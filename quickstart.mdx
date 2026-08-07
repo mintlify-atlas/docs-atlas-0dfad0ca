@@ -90,7 +90,7 @@ just dev
 
 `just dev`:
 1. Checks that ports 3000, 8080, and 9102 are free
-2. Builds agent sidecar binaries (`buzz-acp`, `buzz-agent`, `buzz-dev-mcp`, `buzz-cli`, `git-credential-nostr`, `buzz-relay`)
+2. Builds agent sidecar binaries (`buzz-acp`, `buzz-agent`, `buzz-backend-kubernetes`, `buzz-dev-mcp`, `buzz-cli`, `git-credential-nostr`, `buzz-relay`)
 3. Launches `buzz-relay` in the background, waits for it to pass `/_readiness`
 4. Starts the Tauri desktop app with Vite HMR pointing at the running relay
 

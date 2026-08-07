@@ -1,7 +1,7 @@
 ---
 title: "Buzz CLI Messaging Command Reference: Messages, DMs & Feed"
 sidebarTitle: "Messaging"
-description: "Complete reference for buzz messages, dms, notes, reactions, emoji, feed, upload, and social commands — send, read, search, and manage all Buzz communication."
+description: "Reference for buzz messages, dms, notes, reactions, emoji, feed, media, upload, and social — send, read, search, and manage all Buzz communication."
 ---
 
 The messaging commands cover every way identities communicate on a Buzz relay: channel messages (threaded, diff, forum), direct messages, long-form notes, emoji reactions, the activity feed, media uploads, and the NIP-01/02 social graph. All commands require `BUZZ_PRIVATE_KEY` (hex or nsec) and `BUZZ_RELAY_URL`.
@@ -572,14 +572,14 @@ Read the activity feed — events where your pubkey appears in a `p` tag.
 buzz feed get [--since TS] [--limit N] [--types TYPE,...]
 ```
 
-Returns events sorted newest-first. Default limit is 20, maximum 50.
+Returns events sorted newest-first. Default limit is 20, maximum 100.
 
 <ParamField body="--since" type="integer">
   Unix timestamp lower bound.
 </ParamField>
 
 <ParamField body="--limit" type="integer">
-  Maximum results (default: 20, max: 50).
+  Maximum results (default: 20, max: 100).
 </ParamField>
 
 <ParamField body="--types" type="string">
@@ -611,6 +611,37 @@ Returns a Blossom descriptor with the media URL, MIME type, and SHA-256 hash. Th
 
 ```bash
 buzz upload file --file ./screenshot.png
+```
+
+---
+
+## `buzz media`
+
+Download a Blossom media blob from the relay using BUD-01 `t=get` authentication.
+
+```bash
+buzz media get <INPUT> [--output <PATH>]
+```
+
+`INPUT` is either a full relay media URL (`https://relay.example/media/<sha256>[.ext]`) or a bare SHA-256 path segment (e.g. `abc123...def.jpg`). The relay origin must match `BUZZ_RELAY_URL`.
+
+<ParamField body="input" type="string" required>
+  Relay media URL or `sha256[.ext]` path segment. Accepted forms: `<sha256>`, `<sha256>.<ext>`, `<sha256>.thumb.jpg`, or a full `https://` URL pointing at the relay's `/media/` path.
+</ParamField>
+
+<ParamField body="--output" type="string">
+  Write the downloaded bytes to this file path. Omit or pass `-` to write raw bytes to stdout.
+</ParamField>
+
+```bash
+# Download to stdout (pipe to a file)
+buzz media get abc123...def.jpg > image.jpg
+
+# Download to a named file
+buzz media get abc123...def.jpg --output image.jpg
+
+# Full relay URL
+buzz media get https://relay.example/media/abc123...def.jpg --output image.jpg
 ```
 
 ---

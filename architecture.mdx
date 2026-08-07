@@ -1,14 +1,14 @@
 ---
 title: "Buzz Architecture: Relay, Crates, Protocol, and Storage"
 sidebarTitle: "Architecture"
-description: "How Buzz works under the hood — the relay as single source of truth, Nostr NIP-01 event pipeline, crate dependency hierarchy, and Postgres plus Redis storage layers."
+description: "How Buzz works under the hood — relay as single source of truth, NIP-01 event pipeline, crate dependency hierarchy, and Postgres plus Redis storage layers."
 ---
 
 Buzz is a Rust monorepo (Cargo workspace) built around a single architectural principle: **the relay is the single source of truth**. All reads and all writes flow through `buzz-relay` over WebSocket. There is no peer-to-peer event exchange, no gossip, and no replication — just clients connecting to one relay, and the relay enforcing auth, verifying Schnorr signatures, persisting events, fanning out to subscribers, indexing for search, and triggering automation.
 
 ## System Overview
 
-```
+```text
 ┌─────────────────────────────────────────────────────────────────────────┐
 │                              CLIENTS                                    │
 │                                                                         │
@@ -44,7 +44,7 @@ A Buzz **community** is the tenant-visible workspace selected by the request hos
 
 The workspace is organized as a layered set of focused crates. Cross-subsystem coordination happens **only** through `buzz-relay` — service crates are deliberately isolated from each other.
 
-```
+```text
 buzz-core    (zero I/O — types, Schnorr verify, filter matching, kind registry)
     │
     ├── buzz-db          (Postgres: events, channels, tokens, workflows, audit)
@@ -98,6 +98,8 @@ The `kind` integer is the **only** dispatch switch. The relay routes, stores, an
 | Relay → Client | `["EVENT", <sub_id>, <event>]` | Deliver a matching event |
 | Relay → Client | `["EOSE", <sub_id>]` | End of stored events |
 | Relay → Client | `["OK", <event_id>, true/false, ""]` | Event acceptance result |
+| Relay → Client | `["CLOSED", <sub_id>, "reason"]` | Subscription closed by relay |
+| Relay → Client | `["NOTICE", "message"]` | Informational message |
 | Relay → Client | `["AUTH", <challenge>]` | Authentication challenge |
 
 Limits: max frame size 65,536 bytes · max subscriptions per connection 1,024 · max historical results per filter 500.
@@ -130,7 +132,7 @@ Limits: max frame size 65,536 bytes · max subscriptions per connection 1,024 ·
 
 When the relay receives `["EVENT", <event>]`, the handler runs this pipeline in order:
 
-```
+```text
  1. AUTH CHECK        — AuthState::Authenticated? MessagesWrite scope?
  2. PUBKEY MATCH      — event.pubkey == auth_context.pubkey?
  3. KIND_AUTH REJECT  — kind 22242 is never stored

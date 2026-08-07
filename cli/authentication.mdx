@@ -1,7 +1,7 @@
 ---
 title: "Buzz CLI Authentication: Keys, NIP-98, and NIP-OA"
 sidebarTitle: "Authentication"
-description: "How the buzz CLI authenticates every request using Nostr private keys, NIP-98 HTTP auth event signing, and optional NIP-OA auth tags for token-based access."
+description: "How the buzz CLI authenticates requests using Nostr private keys, NIP-98 HTTP auth signing, and optional NIP-OA auth tags for token-based relay access."
 ---
 
 Every `buzz` command is authenticated using a Nostr private key. There are no username/password credentials, session cookies, or long-lived API tokens in the traditional sense — your cryptographic identity **is** your key. The CLI derives your public key automatically from the private key and signs each HTTP request before it leaves your machine.
@@ -60,7 +60,7 @@ For token-based or delegated access, set `BUZZ_AUTH_TAG` to a NIP-OA auth tag. A
 
 The CLI accepts both strict JSON and the unquoted shorthand (as sometimes written by hand or in `.env` files):
 
-```
+```bash
 BUZZ_AUTH_TAG=[auth,<owner-pubkey>,<conditions>,<sig>]
 ```
 

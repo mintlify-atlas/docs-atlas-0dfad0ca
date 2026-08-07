@@ -22,27 +22,27 @@ Variables that control the `buzz-relay` process itself.
   64-character hex Nostr private key used as the relay's signing identity. Generated automatically by `just setup` if absent. **Rotating this key changes the relay's identity** — existing federation peers will not recognize the new key.
 </ParamField>
 
-<ParamField query="BUZZ_AUTO_MIGRATE" type="boolean" default="true">
-  When `true`, the relay runs embedded database migrations at startup behind a Postgres advisory lock. Set to `false` to run migrations manually via `buzz-admin migrate` before each deploy.
+<ParamField query="BUZZ_AUTO_MIGRATE" type="boolean" default="false">
+  When `true`, the relay runs embedded database migrations at startup behind a Postgres advisory lock. Defaults to `false` — set explicitly to `true` to enable automatic migrations, or run them manually via `buzz-admin migrate` before each deploy.
 </ParamField>
 
 <ParamField query="BUZZ_WEB_DIR" type="string">
   Path to the compiled web frontend (`web/dist`). When set, the relay serves the web UI at `/` for browser requests. Leave unset in local dev and use `just web` for Vite HMR instead.
 </ParamField>
 
-<ParamField query="BUZZ_REQUIRE_RELAY_MEMBERSHIP" type="boolean" default="true">
-  Require connecting pubkeys to be members of the relay before they can post events. Disable only for fully open relays.
+<ParamField query="BUZZ_REQUIRE_RELAY_MEMBERSHIP" type="boolean" default="false">
+  When `true`, require connecting pubkeys to be members of the relay before they can post events. Defaults to `false`; set to `true` for closed/private relays.
 </ParamField>
 
 <ParamField query="BUZZ_PUBKEY_ALLOWLIST" type="boolean" default="false">
   Set to `true` to activate a pubkey allowlist. When enabled, only pubkeys explicitly added via `buzz-admin add-member` may connect.
 </ParamField>
 
-<ParamField query="BUZZ_ALLOW_NIP_OA_AUTH" type="boolean" default="true">
-  Allow NIP-OA (OAuth-style) authentication. Disable to restrict to NIP-42 Schnorr-signed authentication only.
+<ParamField query="BUZZ_ALLOW_NIP_OA_AUTH" type="boolean" default="false">
+  When `true`, allow NIP-OA (OAuth-style) authentication in addition to NIP-42 Schnorr-signed authentication. Defaults to `false`.
 </ParamField>
 
-<ParamField query="RUST_LOG" type="string" default="buzz_relay=debug,buzz_db=debug,buzz_auth=debug">
+<ParamField query="RUST_LOG" type="string" default="buzz_relay=debug,buzz_db=debug,buzz_auth=debug,buzz_pubsub=debug,tower_http=debug">
   Log verbosity per crate. Uses the standard `tracing-subscriber` `EnvFilter` syntax. Example: `buzz_relay=info,tower_http=warn`.
 </ParamField>
 
@@ -60,8 +60,16 @@ Variables that control the `buzz-relay` process itself.
   Maximum API calls per minute for human clients.
 </ParamField>
 
+<ParamField query="BUZZ_RATE_LIMIT_HUMAN_WS_EVENTS_PER_SEC" type="integer" default="10">
+  Maximum WebSocket events per second for human clients.
+</ParamField>
+
 <ParamField query="BUZZ_RATE_LIMIT_AGENT_STANDARD_MESSAGES_PER_MIN" type="integer" default="120">
   Maximum messages per minute for standard-tier agent identities.
+</ParamField>
+
+<ParamField query="BUZZ_RATE_LIMIT_AGENT_STANDARD_API_CALLS_PER_MIN" type="integer" default="600">
+  Maximum API calls per minute for standard-tier agent identities.
 </ParamField>
 
 <ParamField query="BUZZ_RATE_LIMIT_AGENT_ELEVATED_MESSAGES_PER_MIN" type="integer" default="300">

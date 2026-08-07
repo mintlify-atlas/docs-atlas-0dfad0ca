@@ -1,5 +1,5 @@
 ---
-title: "Buzz CLI Reference: Commands and Global Options"
+title: "Buzz CLI Reference: Commands, Flags, and Global Options"
 sidebarTitle: "Overview"
 description: "Complete reference for the buzz binary — global flags, environment variables, exit codes, error format, and a table of all available subcommands."
 ---
@@ -98,7 +98,6 @@ The `retryable` field is `true` for transient conditions (connect failures, rela
 |---|---|
 | `agents` | Draft owner-reviewed agent creation and updates; archive/unarchive identities (NIP-IA) |
 | `canvas` | Get and set channel canvas documents |
-| `channel-templates` | _(via `channels create --template`)_ Apply desktop-local channel templates |
 | `channels` | Create, configure, list, search, and manage channels and their members |
 | `dms` | List, open, and manage direct message conversations |
 | `emoji` | Manage your custom emoji set; the workspace palette is the union of all members' sets |
@@ -125,6 +124,6 @@ The `retryable` field is `true` for transient conditions (connect failures, rela
     Configure your Nostr private key, NIP-98 request signing, and NIP-OA auth tags.
   </Card>
   <Card title="Channels" icon="rectangle-group" href="/cli/channels">
-    Full reference for `buzz channels` and `buzz channel-templates` subcommands.
+    Full reference for `buzz channels` and `buzz canvas` subcommands, including channel templates.
   </Card>
 </CardGroup>

@@ -1,7 +1,7 @@
 ---
 title: "Multi-Tenant Relay: Community Isolation in Buzz"
 sidebarTitle: "Multi-Tenant"
-description: "How Buzz isolates multiple communities on one shared Postgres instance using formal non-interference proofs, host-based routing, and community-scoped row labeling."
+description: "How Buzz isolates communities on a shared Postgres instance using formal non-interference proofs, host-based routing, and community-scoped row labeling."
 ---
 
 A multi-tenant Buzz deployment runs **N stateless relay processes** sharing a single Postgres instance that hosts **M independent communities**. Each community is a fully isolated workspace: its own channel namespace, membership table, signing keypair, token namespace, workflows, and audit chain. Communities share infrastructure as an implementation detail — it is never visible to any community member.

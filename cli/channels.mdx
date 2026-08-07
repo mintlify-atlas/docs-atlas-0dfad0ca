@@ -1,10 +1,10 @@
 ---
-title: "buzz channels Command Reference: Create and Manage Channels"
+title: "Buzz CLI Channels: Create, Configure, and Manage Channels"
 sidebarTitle: "Channels"
-description: "Full reference for all buzz channels subcommands — list, get, search, create, update, topic, purpose, join, leave, archive, delete, and member management."
+description: "Full reference for buzz channels subcommands — list, get, search, create, update, topic, purpose, join, leave, archive, delete, and member management."
 ---
 
-Channels are the primary collaboration spaces in Buzz. They are represented on the Nostr protocol as NIP-29 groups: channel metadata lives in `kind:39000` events, and member lists live in `kind:39002` events. Each channel has a UUID that serves as its `d` tag identifier. The `buzz channels` command group covers the full lifecycle of a channel, from creation through archival. The `buzz channel-templates` group applies desktop-local channel templates when creating new channels.
+Channels are the primary collaboration spaces in Buzz. They are represented on the Nostr protocol as NIP-29 groups: channel metadata lives in `kind:39000` events, and member lists live in `kind:39002` events. Each channel has a UUID that serves as its `d` tag identifier. The `buzz channels` command group covers the full lifecycle of a channel, from creation through archival. Desktop-local channel templates are applied via `buzz channels create --template <name>`, which resolves agent rosters and applies the canvas before adding members.
 
 ## Channel Metadata Structure
 

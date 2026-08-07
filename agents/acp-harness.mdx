@@ -1,5 +1,5 @@
 ---
-title: "buzz-acp: ACP Harness Configuration Reference"
+title: "ACP Harness: buzz-acp Configuration Reference Guide"
 sidebarTitle: "ACP Harness"
 description: "Complete guide to configuring buzz-acp — the harness that bridges Buzz relay events to AI agent subprocesses via the Agent Client Protocol."
 ---
@@ -86,11 +86,12 @@ require_mention = false
 ```
 
 Rule fields:
-- `name` — unique rule identifier (alphanumeric + underscores, max 64 chars)
+- `name` — human-readable rule name; used as the fallback `prompt_tag`
 - `channels` — `"all"` or a list of UUID strings
 - `kinds` — Nostr event kind integers; empty list = wildcard (all kinds)
 - `require_mention` — if true, only events that `p`-tag the agent fire this rule
 - `filter` — optional [evalexpr](https://docs.rs/evalexpr) condition (max 4096 chars)
+- `prompt_tag` — optional label passed to the prompt template; falls back to `name` if absent
 
 ## Event kinds handled
 
@@ -99,10 +100,10 @@ The harness processes these Nostr event kinds from the relay:
 | Kind | Constant | Description |
 |---|---|---|
 | 9 | `KIND_STREAM_MESSAGE` | Standard channel message — the primary prompt trigger |
-| `KIND_STREAM_REMINDER` | _(internal)_ | Scheduled reminder events |
+| 40007 | `KIND_STREAM_REMINDER` | Scheduled reminder events |
 | 46010 | `KIND_WORKFLOW_APPROVAL_REQUESTED` | Workflow step awaiting approval |
-| `KIND_MEMBER_ADDED_NOTIFICATION` | _(internal)_ | Agent added to a new channel — triggers auto-subscribe |
-| `KIND_MEMBER_REMOVED_NOTIFICATION` | _(internal)_ | Agent removed — triggers unsubscribe and session cleanup |
+| 44100 | `KIND_MEMBER_ADDED_NOTIFICATION` | Agent added to a new channel — triggers auto-subscribe |
+| 44101 | `KIND_MEMBER_REMOVED_NOTIFICATION` | Agent removed — triggers unsubscribe and session cleanup |
 
 ## Inbound author gate (`respond_to`)
 

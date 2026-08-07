@@ -1,7 +1,7 @@
 ---
 title: "Remote Agents: Running Agents on External Substrates"
 sidebarTitle: "Remote Agents"
-description: "How Buzz Desktop delegates agent execution to remote compute via provider binaries, covering the provider protocol, lifecycle model, and Kubernetes binding."
+description: "How Buzz Desktop delegates agent execution to remote compute via provider binaries, covering the provider protocol, lifecycle, and Kubernetes binding."
 ---
 
 Remote agents let Buzz Desktop run a managed agent on any compute substrate — a Kubernetes cluster, a cloud VM, a Blox workstation — without keeping a local process alive. The desktop handles identity and configuration; a **provider binary** handles deployment; and the **relay** is the only channel between the desktop and the running agent. This document covers the protocol, the lifecycle contract, and the first conforming implementation (`buzz-backend-kubernetes`).

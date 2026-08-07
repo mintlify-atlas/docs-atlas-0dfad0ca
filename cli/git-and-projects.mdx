@@ -1,7 +1,7 @@
 ---
 title: "Buzz CLI Git & Projects: Repos, Patches, PRs, Issues & More"
 sidebarTitle: "Git & Projects"
-description: "Reference for buzz repos, patches, pr, projects, issues, and mem commands — NIP-34 git integration, branch protection, patches, pull requests, and shared memory."
+description: "Reference for buzz repos, patches, pr, projects, issues, and mem — NIP-34 git integration, branch protection, pull requests, issues, and agent memory."
 ---
 
 Buzz integrates git version control directly into the Nostr event graph using [NIP-34](https://github.com/nostr-protocol/nips/blob/master/34.md). Repository announcements, patches, pull requests, and issues are all signed Nostr events. The `buzz-channel` tag on a repository announcement is the git ACL — the relay authorizes `clone`, `fetch`, and `push` by channel membership.
@@ -318,7 +318,7 @@ buzz patches status --root <EVENT-ID> --status <STATUS> \
   [--merge-commit <SHA>] [--applied-as-commit <SHA>]
 ```
 
-Emits a NIP-34 kind:1630–1633 status event. Valid status values: `open`, `merged`, `resolved`, `closed`, `draft`. (`merged` and `resolved` map to the same kind:1631.)
+Emits a NIP-34 kind:1630–1633 status event. Valid status values: `open`, `merged`, `closed`, `draft`. (`merged` maps to kind:1631.)
 
 <ParamField body="--root" type="string" required>
   Root patch event ID (first patch of the series/revision).
@@ -491,6 +491,26 @@ buzz pr update \
   Clone URL for the updated tip. Repeatable.
 </ParamField>
 
+<ParamField body="--body" type="string">
+  Markdown context for the update. Use `-` to read from stdin. Conflicts with `--body-file`.
+</ParamField>
+
+<ParamField body="--body-file" type="string">
+  Path to markdown context for the update, or `-` for stdin. Conflicts with `--body`.
+</ParamField>
+
+<ParamField body="--merge-base" type="string">
+  Most recent common ancestor with the target branch.
+</ParamField>
+
+<ParamField body="--euc" type="string">
+  Earliest-unique-commit of the repo.
+</ParamField>
+
+<ParamField body="--to" type="string">
+  Additional recipient pubkey. Repeatable.
+</ParamField>
+
 </Accordion>
 
 <Accordion title="pr get / list / status">
@@ -519,6 +539,14 @@ Valid status values: `open`, `merged`, `closed`, `draft`.
 
 <ParamField body="--status" type="string" required>
   `open`, `merged`, `closed`, or `draft`.
+</ParamField>
+
+<ParamField body="--body" type="string">
+  Markdown context for the status change. Use `-` to read from stdin. Conflicts with `--body-file`. (`status` only.)
+</ParamField>
+
+<ParamField body="--body-file" type="string">
+  Path to markdown context for the status change, or `-` for stdin. Conflicts with `--body`. (`status` only.)
 </ParamField>
 
 <ParamField body="--merge-commit" type="string">

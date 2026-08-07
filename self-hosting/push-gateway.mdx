@@ -1,7 +1,7 @@
 ---
 title: "Buzz Push Gateway: APNs Deployment and Operations"
 sidebarTitle: "Push Gateway"
-description: "Deploy and operate buzz-push-gateway, the standalone APNs last-hop for iOS push notifications. Covers ports, secrets, Helm, Prometheus metrics, and key rotation."
+description: "Deploy and operate buzz-push-gateway, the standalone APNs last-hop for iOS push notifications. Covers ports, secrets, Helm, metrics, and key rotation."
 ---
 
 `buzz-push-gateway` is the standalone Apple Push Notification service (APNs) last-hop intended for `push.buzz.xyz`. It is a separate binary and Docker image from the relay — build it with `Dockerfile.push-gateway`. Never run it inside the relay image or give relay processes APNs credentials. The gateway handles client enrollment, capability delegation, and final APNs delivery; relays retain lease matching, authorization, coalescing, and durable retry, but never see raw device tokens or provider keys.
@@ -27,7 +27,7 @@ Readiness fails when the PostgreSQL authority store is unavailable. Graceful shu
 
 ## Required Environment Variables
 
-All 14 required variables must be set for the gateway to start. Readiness rejects a partial or misconfigured schema.
+All required variables must be set for the gateway to start. Readiness rejects a partial or misconfigured schema.
 
 ### Database
 
@@ -251,7 +251,7 @@ prometheusRule:
 
 | Alert | Fires when | Severity | Operator action |
 |-------|-----------|---------|----------------|
-| `PushGatewayConfigurationFault` | Any `configuration_fault` outcomes for 10 min | critical | APNs provider token/topic is unhealthy. Check `.p8` key, `BUZZ_PUSH_APNS_KEY_ID`, `TEAM_ID`, and `TOPIC`. Nothing is delivering. |
+| `PushGatewayConfigurationFault` | Any `configuration_fault` outcomes for 10 min | critical | APNs provider token/topic is unhealthy. Check `.p8` key, `BUZZ_PUSH_APNS_KEY_ID`, `BUZZ_PUSH_APNS_TEAM_ID`, and `BUZZ_PUSH_APNS_TOPIC`. Nothing is delivering. |
 | `PushGatewayAdmissionUnavailable` | Any admission `unavailable` for 5 min | critical | PostgreSQL authority store unreachable. Check DB connectivity and `postgresEgressCidrs` NetworkPolicy. |
 | `PushGatewayReadinessAuthorityFailing` | Readiness `authority` failures for 5 min | warning | Replicas are being pulled from Service on DB failure. Fix DB health before capacity drops below the PodDisruptionBudget. |
 | `PushGatewayReaperFailing` | Reaper failed ≥ 2 times within 30 min | warning | Expired reservations aren't being swept. Check DB write availability. |

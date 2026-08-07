@@ -66,7 +66,7 @@ The root `docker-compose.yml` defines the full local development stack. All serv
 | Redis 7 | `redis:7-alpine` | `6379` | 128 MB |
 | Adminer | `adminer:latest` | `8082` | 64 MB |
 | MinIO | `minio/minio:latest` | `9000` (API), `9001` (console) | 256 MB |
-| Keycloak | `keycloak:26.0` | `8180` | 512 MB |
+| Keycloak | `quay.io/keycloak/keycloak:26.0` | `8180` | 512 MB |
 | Prometheus | `prom/prometheus:latest` | `9090` | 128 MB |
 
 **Health checks:**
@@ -119,7 +119,7 @@ The relay embeds database migrations via `sqlx::migrate!` and runs them at start
 | `just down` | Stop all dev services (data is preserved) |
 | `just ps` | Show dev service status |
 | `just logs` | Tail all service logs |
-| `just check` | Run `fmt + clippy + desktop check` |
+| `just check` | Run `fmt-check`, `clippy`, `desktop-check`, `desktop-tauri-fmt-check`, `desktop-tauri-clippy`, `web-check`, `mobile-check` |
 
 </Accordion>
 
@@ -196,8 +196,9 @@ The relay Secret must contain:
 | Key | Purpose |
 |-----|---------|
 | `BUZZ_RELAY_PRIVATE_KEY` | 64-char hex relay identity key (rotation = new identity) |
+| `BUZZ_GIT_HOOK_HMAC_SECRET` | 32+ char HMAC secret — required when `replicaCount > 1` |
 | `DATABASE_URL` | Full Postgres connection URL |
-| `REDIS_URL` | Redis URL with auth |
+| `REDIS_URL` | Redis URL with auth — required when `replicaCount > 1` |
 | `BUZZ_S3_ACCESS_KEY` | S3 access key |
 | `BUZZ_S3_SECRET_KEY` | S3 secret key |
 

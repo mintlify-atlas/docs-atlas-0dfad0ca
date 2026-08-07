@@ -1,5 +1,5 @@
 ---
-title: "How Buzz Uses the Nostr Protocol: Events & Kinds"
+title: "Buzz Nostr Protocol: Events, Kind Numbers, and NIPs"
 sidebarTitle: "Nostr Protocol"
 description: "Buzz is built on Nostr NIP-01 and NIP-29. Every action is a cryptographically signed event dispatched by a single kind integer — here's how it all works."
 ---
@@ -239,6 +239,9 @@ When the relay receives `["EVENT", <event>]`, it runs this pipeline in order:
   </Step>
   <Step title="Pubkey Match">
     `event.pubkey` must equal the authenticated connection's pubkey.
+  </Step>
+  <Step title="KIND_AUTH Reject">
+    If `kind == 22242` (`KIND_AUTH`), the event is rejected immediately — NIP-42 AUTH events are never stored in Postgres, never audited, and never fanned out.
   </Step>
   <Step title="Ephemeral Route">
     Kinds 20000–29999 take the ephemeral sub-pipeline: verify, presence/pub-sub, local fan-out. Never stored.
