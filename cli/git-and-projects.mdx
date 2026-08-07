@@ -1,0 +1,795 @@
+---
+title: "Buzz CLI Git & Projects: Repos, Patches, PRs, Issues & More"
+sidebarTitle: "Git & Projects"
+description: "Reference for buzz repos, patches, pr, projects, issues, and mem commands — NIP-34 git integration, branch protection, patches, pull requests, and shared memory."
+---
+
+Buzz integrates git version control directly into the Nostr event graph using [NIP-34](https://github.com/nostr-protocol/nips/blob/master/34.md). Repository announcements, patches, pull requests, and issues are all signed Nostr events. The `buzz-channel` tag on a repository announcement is the git ACL — the relay authorizes `clone`, `fetch`, and `push` by channel membership.
+
+## How git integration works
+
+- **Repository announcements** (kind:30617) are parameterized-replaceable events keyed by `(pubkey, repo-id)`. They carry clone URLs, relay hints, and the `buzz-channel` binding that gates git access.
+- **`BUZZ_GIT_ORIGIN_CHANNEL_ID`** — when set, git operations attach the channel UUID via an `h` tag, tying the event to a channel room. Feature branches can trigger auto-room creation in Buzz Desktop.
+- **`git-credential-nostr`** — a Nostr-based git credential helper that authenticates git operations using the caller's `BUZZ_PRIVATE_KEY`.
+- **`git-sign-nostr`** — a Nostr-based commit signing helper.
+- **Patches** use NIP-34 kind:1617 events. The `diffy` unified diff parser is used internally by `buzz mem patch` to apply patches against shared memory slugs.
+
+---
+
+## `buzz repos`
+
+Announce and manage git repositories.
+
+<Accordion title="repos create — publish a repository announcement">
+
+```bash
+buzz repos create --id <REPO-ID> \
+  [--name <NAME>] [--description <TEXT>] \
+  [--clone <URL>] [--web <URL>] \
+  [--nostr-relay <URL>] [--channel <UUID>]
+```
+
+Publishes a NIP-34 kind:30617 repository announcement. The `--channel` flag binds the repo to a Buzz channel for git ACL purposes — without it the relay returns 404 for every clone/fetch/push.
+
+<ParamField body="--id" type="string" required>
+  Repository identifier. Pattern: `[a-zA-Z0-9._-]{1,64}`.
+</ParamField>
+
+<ParamField body="--name" type="string">
+  Human-readable display name.
+</ParamField>
+
+<ParamField body="--description" type="string">
+  Repository description.
+</ParamField>
+
+<ParamField body="--clone" type="string">
+  Clone URL. Repeatable for multiple remotes.
+</ParamField>
+
+<ParamField body="--web" type="string">
+  Web browsing URL.
+</ParamField>
+
+<ParamField body="--nostr-relay" type="string">
+  Preferred Nostr relay for repo discovery. Repeatable.
+</ParamField>
+
+<ParamField body="--channel" type="string">
+  Channel UUID to bind the repo to. Sets the `buzz-channel` git ACL tag.
+</ParamField>
+
+```bash
+buzz repos create \
+  --id my-service \
+  --name "My Service" \
+  --description "Backend API" \
+  --clone https://relay.example/git/owner/my-service \
+  --channel 3580ca9b-47b4-4af9-b22a-1068778f26c6
+```
+
+Output includes a `link` field that renders as a rich preview card in Buzz Desktop.
+
+</Accordion>
+
+<Accordion title="repos get — fetch a repository announcement">
+
+```bash
+buzz repos get --id <REPO-ID> [--owner <PUBKEY-HEX>]
+```
+
+<ParamField body="--id" type="string" required>
+  Repository identifier (d-tag).
+</ParamField>
+
+<ParamField body="--owner" type="string">
+  Owner pubkey (64-char hex). Omit to return any matching repo.
+</ParamField>
+
+</Accordion>
+
+<Accordion title="repos list — list repositories">
+
+```bash
+buzz repos list [--owner <PUBKEY-HEX>] [--limit N]
+```
+
+<ParamField body="--owner" type="string">
+  Owner pubkey (64-char hex). Defaults to the current identity.
+</ParamField>
+
+<ParamField body="--limit" type="integer">
+  Maximum results.
+</ParamField>
+
+</Accordion>
+
+<Accordion title="repos bind — bind a repo to a channel">
+
+```bash
+buzz repos bind --id <REPO-ID> --channel <UUID>
+```
+
+Read-modify-write update that replaces the `buzz-channel` tag on an existing announcement. All other metadata (protection rules, name, description) is preserved. The UUID is validated for shape only — channel existence and membership are the relay's authority at git-access time.
+
+<ParamField body="--id" type="string" required>
+  Repository identifier (d-tag).
+</ParamField>
+
+<ParamField body="--channel" type="string" required>
+  Channel UUID to bind. Replaces any existing binding.
+</ParamField>
+
+```bash
+buzz repos bind --id my-service --channel 3580ca9b-47b4-4af9-b22a-1068778f26c6
+```
+
+</Accordion>
+
+<Accordion title="repos protect — manage branch/tag protection rules">
+
+Protection rules are stored as `buzz-protect` tags on the kind:30617 announcement. Up to 50 rules are supported.
+
+```bash
+# List rules
+buzz repos protect list --id <REPO-ID>
+
+# Create or replace a rule
+buzz repos protect set --id <REPO-ID> --ref <PATTERN> \
+  [--push <owner|admin|member>] \
+  [--no-force-push] [--no-delete] [--require-patch]
+
+# Remove a rule
+buzz repos protect remove --id <REPO-ID> --ref <PATTERN>
+```
+
+**`repos protect list`**
+
+<ParamField body="--id" type="string" required>
+  Repository identifier.
+</ParamField>
+
+**`repos protect set`**
+
+<ParamField body="--id" type="string" required>
+  Repository identifier.
+</ParamField>
+
+<ParamField body="--ref" type="string" required>
+  Full ref pattern (e.g. `refs/heads/main`, `refs/heads/*`, `refs/tags/*`). At least one rule flag is required.
+</ParamField>
+
+<ParamField body="--push" type="string">
+  Minimum channel role permitted to push. Options: `owner`, `admin`, `member`.
+</ParamField>
+
+<ParamField body="--no-force-push" type="boolean">
+  Reject non-fast-forward updates.
+</ParamField>
+
+<ParamField body="--no-delete" type="boolean">
+  Reject deletion of matching refs.
+</ParamField>
+
+<ParamField body="--require-patch" type="boolean">
+  Require the NIP-34 patch workflow instead of direct pushes.
+</ParamField>
+
+**`repos protect remove`**
+
+<ParamField body="--id" type="string" required>
+  Repository identifier.
+</ParamField>
+
+<ParamField body="--ref" type="string" required>
+  Exact ref pattern to remove all rules for.
+</ParamField>
+
+```bash
+buzz repos protect set --id my-service --ref refs/heads/main --push admin --no-force-push
+buzz repos protect set --id my-service --ref refs/tags/* --no-delete
+buzz repos protect list --id my-service
+buzz repos protect remove --id my-service --ref refs/heads/main
+```
+
+</Accordion>
+
+---
+
+## `buzz patches`
+
+Send, retrieve, list, and set status on git patches (NIP-34 kind:1617).
+
+<Accordion title="patches send — submit a patch">
+
+```bash
+buzz patches send \
+  --repo-owner <PUBKEY-HEX> --repo-id <REPO-ID> \
+  --patch-file <PATH|-> \
+  [--euc <SHA>] [--to <PUBKEY>] \
+  [--reply-to <EVENT-ID>] \
+  [--root] [--root-revision] \
+  [--commit <SHA>] [--parent-commit <SHA>] \
+  [--commit-pgp-sig <SIG>] [--committer <SPEC>]
+```
+
+<ParamField body="--repo-owner" type="string" required>
+  Repo owner pubkey (64-char hex).
+</ParamField>
+
+<ParamField body="--repo-id" type="string" required>
+  Repo identifier (d-tag).
+</ParamField>
+
+<ParamField body="--patch-file" type="string" required>
+  Path to a `git format-patch` output file, or `-` to read from stdin.
+</ParamField>
+
+<ParamField body="--euc" type="string">
+  Earliest-unique-commit of the repository.
+</ParamField>
+
+<ParamField body="--to" type="string">
+  Additional recipient pubkey (64-char hex). Repeatable.
+</ParamField>
+
+<ParamField body="--reply-to" type="string">
+  Previous patch event ID (for series) or original root (for revision).
+</ParamField>
+
+<ParamField body="--root" type="boolean">
+  Mark this as the first patch of a new series.
+</ParamField>
+
+<ParamField body="--root-revision" type="boolean">
+  Mark this as the first patch of a new revision of an existing series.
+</ParamField>
+
+<ParamField body="--commit" type="string">
+  Commit ID this patch produces when applied.
+</ParamField>
+
+<ParamField body="--parent-commit" type="string">
+  Parent commit ID.
+</ParamField>
+
+<ParamField body="--commit-pgp-sig" type="string">
+  PGP signature of the commit.
+</ParamField>
+
+<ParamField body="--committer" type="string">
+  Committer identity in the format `name|email|timestamp|tz-offset-minutes`.
+</ParamField>
+
+```bash
+git format-patch -1 HEAD --stdout | \
+  buzz patches send \
+    --repo-owner <HEX> --repo-id my-service \
+    --patch-file - --root \
+    --commit $(git rev-parse HEAD)
+```
+
+</Accordion>
+
+<Accordion title="patches get — fetch a patch by event ID">
+
+```bash
+buzz patches get --event <EVENT-ID>
+```
+
+<ParamField body="--event" type="string" required>
+  Patch event ID (64-char hex).
+</ParamField>
+
+</Accordion>
+
+<Accordion title="patches list — list patches for a repo">
+
+```bash
+buzz patches list --repo-owner <HEX> --repo-id <REPO-ID> [--author <HEX>] [--limit N]
+```
+
+<ParamField body="--repo-owner" type="string" required>
+  Repo owner pubkey (64-char hex).
+</ParamField>
+
+<ParamField body="--repo-id" type="string" required>
+  Repo identifier (d-tag).
+</ParamField>
+
+<ParamField body="--author" type="string">
+  Filter by patch author pubkey (64-char hex).
+</ParamField>
+
+<ParamField body="--limit" type="integer">
+  Maximum results.
+</ParamField>
+
+</Accordion>
+
+<Accordion title="patches status — set patch status">
+
+```bash
+buzz patches status --root <EVENT-ID> --status <STATUS> \
+  [--content <TEXT|->] \
+  [--repo-owner <HEX>] [--repo-id <REPO-ID>] \
+  [--euc <SHA>] [--revision <EVENT-ID>] \
+  [--to <PUBKEY>] [--q <PATCH-REF>] \
+  [--merge-commit <SHA>] [--applied-as-commit <SHA>]
+```
+
+Emits a NIP-34 kind:1630–1633 status event. Valid status values: `open`, `merged`, `resolved`, `closed`, `draft`. (`merged` and `resolved` map to the same kind:1631.)
+
+<ParamField body="--root" type="string" required>
+  Root patch event ID (first patch of the series/revision).
+</ParamField>
+
+<ParamField body="--status" type="string" required>
+  `open`, `merged`, `closed`, or `draft`.
+</ParamField>
+
+<ParamField body="--content" type="string">
+  Markdown context for the status change. Use `-` to read from stdin.
+</ParamField>
+
+<ParamField body="--repo-owner" type="string">
+  Repo owner pubkey. Requires `--repo-id`.
+</ParamField>
+
+<ParamField body="--repo-id" type="string">
+  Repo identifier. Requires `--repo-owner`.
+</ParamField>
+
+<ParamField body="--euc" type="string">
+  Earliest-unique-commit.
+</ParamField>
+
+<ParamField body="--revision" type="string">
+  Root event ID of the accepted revision (status=merged only).
+</ParamField>
+
+<ParamField body="--to" type="string">
+  Additional recipient pubkey. Repeatable.
+</ParamField>
+
+<ParamField body="--q" type="string">
+  Applied patch event reference. Formats: `<id>`, `<id>:<relay-url>`, or `<id>:<relay-url>:<pubkey>`. Repeatable.
+</ParamField>
+
+<ParamField body="--merge-commit" type="string">
+  Merge commit ID (status=merged only).
+</ParamField>
+
+<ParamField body="--applied-as-commit" type="string">
+  Commit ID applied to the target branch. Repeatable.
+</ParamField>
+
+```bash
+buzz patches status \
+  --root <event-id> --status merged \
+  --repo-owner <HEX> --repo-id my-service \
+  --merge-commit $(git rev-parse HEAD)
+```
+
+</Accordion>
+
+---
+
+## `buzz pr`
+
+Open, update, list, and set status on git pull requests (NIP-34 kind:1618).
+
+<Accordion title="pr open — open a pull request">
+
+```bash
+buzz pr open \
+  --repo-owner <HEX> --repo-id <REPO-ID> \
+  --subject <TITLE> --commit <SHA> \
+  --clone <URL> \
+  [--body <TEXT|-> | --body-file <PATH|->] \
+  [--branch-name <NAME>] [--merge-base <SHA>] \
+  [--euc <SHA>] [--label <LABEL>] [--to <PUBKEY>] \
+  [--channel <UUID>] [--revision-of <EVENT-ID>]
+```
+
+`--body` and `--body-file` are mutually exclusive. At least one `--clone` is required.
+
+<ParamField body="--repo-owner" type="string" required>
+  Repo owner pubkey (64-char hex).
+</ParamField>
+
+<ParamField body="--repo-id" type="string" required>
+  Repo identifier (d-tag).
+</ParamField>
+
+<ParamField body="--subject" type="string" required>
+  Pull request title (alias: `--title`).
+</ParamField>
+
+<ParamField body="--commit" type="string" required>
+  Tip commit SHA of the PR branch.
+</ParamField>
+
+<ParamField body="--clone" type="string" required>
+  Clone URL where the tip commit can be fetched. Repeatable.
+</ParamField>
+
+<ParamField body="--body" type="string">
+  PR body markdown. Use `-` to read from stdin. Conflicts with `--body-file`.
+</ParamField>
+
+<ParamField body="--body-file" type="string">
+  Path to PR body markdown, or `-` for stdin. Conflicts with `--body`.
+</ParamField>
+
+<ParamField body="--branch-name" type="string">
+  Recommended merge branch name.
+</ParamField>
+
+<ParamField body="--merge-base" type="string">
+  Most recent common ancestor with the target branch.
+</ParamField>
+
+<ParamField body="--euc" type="string">
+  Earliest-unique-commit.
+</ParamField>
+
+<ParamField body="--label" type="string">
+  Label. Repeatable.
+</ParamField>
+
+<ParamField body="--to" type="string">
+  Additional recipient pubkey. Repeatable.
+</ParamField>
+
+<ParamField body="--channel" type="string">
+  Channel UUID where this PR originated (sets the NIP-29 `h` tag).
+</ParamField>
+
+<ParamField body="--revision-of" type="string">
+  Root patch event ID this PR revises.
+</ParamField>
+
+```bash
+buzz pr open \
+  --repo-owner <HEX> --repo-id my-service \
+  --subject "Fix: handle null response" \
+  --commit $(git rev-parse HEAD) \
+  --clone https://relay.example/git/owner/my-service \
+  --branch-name fix-null-response \
+  --body-file -
+```
+
+Output includes a `link` field for rich preview in Buzz Desktop.
+
+</Accordion>
+
+<Accordion title="pr update — push a new tip commit">
+
+```bash
+buzz pr update \
+  --repo-owner <HEX> --repo-id <REPO-ID> \
+  --pr <PR-EVENT-ID> --pr-author <HEX> \
+  --commit <SHA> --clone <URL> \
+  [--body <TEXT|-> | --body-file <PATH|->] \
+  [--merge-base <SHA>] [--euc <SHA>] [--to <PUBKEY>]
+```
+
+<ParamField body="--pr" type="string" required>
+  Pull request event ID being updated (64-char hex).
+</ParamField>
+
+<ParamField body="--pr-author" type="string" required>
+  Pull request author pubkey (64-char hex).
+</ParamField>
+
+<ParamField body="--commit" type="string" required>
+  Updated tip commit SHA.
+</ParamField>
+
+<ParamField body="--clone" type="string" required>
+  Clone URL for the updated tip. Repeatable.
+</ParamField>
+
+</Accordion>
+
+<Accordion title="pr get / list / status">
+
+```bash
+# Get a single PR
+buzz pr get --event <EVENT-ID>
+
+# List PRs for a repo
+buzz pr list \
+  --repo-owner <HEX> --repo-id <REPO-ID> \
+  [--author <HEX>] [--label <LABEL>] [--limit N]
+
+# Set PR status
+buzz pr status --pr <EVENT-ID> --status <STATUS> \
+  [--body <TEXT|-> | --body-file <PATH|->] \
+  [--repo-owner <HEX>] [--repo-id <REPO-ID>] \
+  [--euc <SHA>] [--to <PUBKEY>] [--merge-commit <SHA>]
+```
+
+Valid status values: `open`, `merged`, `closed`, `draft`.
+
+<ParamField body="--pr" type="string" required>
+  PR event ID for the `status` subcommand (64-char hex).
+</ParamField>
+
+<ParamField body="--status" type="string" required>
+  `open`, `merged`, `closed`, or `draft`.
+</ParamField>
+
+<ParamField body="--merge-commit" type="string">
+  Merge commit ID (status=merged only).
+</ParamField>
+
+<ParamField body="--label" type="string">
+  Filter by label (`list` only).
+</ParamField>
+
+</Accordion>
+
+---
+
+## `buzz issues`
+
+Create, retrieve, list, and set status on git issues (NIP-34 kind:1621).
+
+<Accordion title="issues create — open a new issue">
+
+```bash
+buzz issues create \
+  --repo-owner <HEX> --repo-id <REPO-ID> \
+  --title <TITLE> --content <TEXT|-> \
+  [--label <LABEL>] [--to <PUBKEY>]
+```
+
+<ParamField body="--repo-owner" type="string" required>
+  Repo owner pubkey (64-char hex).
+</ParamField>
+
+<ParamField body="--repo-id" type="string" required>
+  Repo identifier (d-tag).
+</ParamField>
+
+<ParamField body="--title" type="string" required>
+  Issue title (alias: `--subject`).
+</ParamField>
+
+<ParamField body="--content" type="string" required>
+  Issue body markdown. Use `-` to read from stdin.
+</ParamField>
+
+<ParamField body="--label" type="string">
+  Label tag. Repeatable.
+</ParamField>
+
+<ParamField body="--to" type="string">
+  Additional recipient pubkey. Repeatable.
+</ParamField>
+
+```bash
+buzz issues create \
+  --repo-owner <HEX> --repo-id my-service \
+  --title "Null pointer in request handler" \
+  --content - \
+  --label bug <<< "Crashes when the API returns an empty body."
+```
+
+Output includes a `link` field for rich preview in Buzz Desktop.
+
+</Accordion>
+
+<Accordion title="issues get / list / status">
+
+```bash
+# Get by event ID
+buzz issues get --event <EVENT-ID>
+
+# List issues for a repo
+buzz issues list \
+  --repo-owner <HEX> --repo-id <REPO-ID> \
+  [--author <HEX>] [--label <LABEL>] [--limit N]
+
+# Set issue status
+buzz issues status --issue <EVENT-ID> --status <STATUS> \
+  [--content <TEXT|->] \
+  [--repo-owner <HEX>] [--repo-id <REPO-ID>] \
+  [--euc <SHA>] [--to <PUBKEY>]
+```
+
+Valid status values: `open`, `resolved`, `closed`, `draft`. (`resolved` maps to the same kind:1631 as `merged`.)
+
+<ParamField body="--issue" type="string" required>
+  Issue event ID (64-char hex).
+</ParamField>
+
+<ParamField body="--status" type="string" required>
+  `open`, `resolved`, `closed`, or `draft`.
+</ParamField>
+
+<ParamField body="--label" type="string">
+  Filter by label (`list` only).
+</ParamField>
+
+</Accordion>
+
+---
+
+## `buzz projects`
+
+Create and manage multi-repo projects (NIP-MP kind:30621). Projects are parameterized-replaceable events keyed by `(pubkey, slug)`. All mutations use read-modify-write with a `created_at + 1` advancement to avoid clobbering concurrent changes.
+
+<Accordion title="projects create">
+
+```bash
+buzz projects create <SLUG> --repo <COORD> \
+  [--name <NAME>] [--description <TEXT>] \
+  [--channel <UUID>] [--visibility listed|unlisted]
+```
+
+At least one `--repo` is required. Fails with a conflict error if the project already exists.
+
+<ParamField body="slug" type="string" required>
+  Project identifier (up to 1024 bytes). Colons are allowed (more permissive than repo IDs).
+</ParamField>
+
+<ParamField body="--repo" type="string" required>
+  Member repository coordinate. Bare Buzz repo ID (e.g. `my-service`) or full `30617:<owner-hex>:<repo-d>` for cross-owner references. Repeatable.
+</ParamField>
+
+<ParamField body="--name" type="string">
+  Display name (max 256 bytes).
+</ParamField>
+
+<ParamField body="--description" type="string">
+  Description (max 2048 bytes).
+</ParamField>
+
+<ParamField body="--channel" type="string">
+  Associated Buzz channel UUID.
+</ParamField>
+
+<ParamField body="--visibility" type="string">
+  `listed` (default, appears in public listings) or `unlisted`.
+</ParamField>
+
+```bash
+buzz projects create platform --repo buzz --repo my-service \
+  --name "Platform Monorepo" --channel <UUID>
+```
+
+</Accordion>
+
+<Accordion title="projects get / list">
+
+```bash
+buzz projects get <SLUG> [--owner <PUBKEY-HEX>]
+buzz projects list [--owner <PUBKEY-HEX>] [--limit N]
+```
+
+<ParamField body="slug" type="string" required>
+  Project slug.
+</ParamField>
+
+<ParamField body="--owner" type="string">
+  Owner pubkey (64-char hex). Defaults to the current identity.
+</ParamField>
+
+</Accordion>
+
+<Accordion title="projects add-repo / remove-repo">
+
+```bash
+buzz projects add-repo    <SLUG> --repo <COORD> [--repo <COORD> ...]
+buzz projects remove-repo <SLUG> --repo <COORD> [--repo <COORD> ...]
+```
+
+`add-repo` returns a conflict error if all requested repos are already members. `remove-repo` returns not-found if a requested repo is absent.
+
+</Accordion>
+
+<Accordion title="projects update — edit metadata">
+
+```bash
+buzz projects update <SLUG> \
+  [--name <NAME> | --clear-name] \
+  [--description <TEXT> | --clear-description] \
+  [--channel <UUID> | --clear-channel] \
+  [--visibility listed|unlisted | --clear-visibility]
+```
+
+At least one setter or clearer is required. A setter and its own clearer are mutually exclusive. The relay rejects the update if a concurrent write raced ahead (conflict error).
+
+</Accordion>
+
+<Accordion title="projects delete">
+
+```bash
+buzz projects delete <SLUG>
+```
+
+Publishes a tombstone at `head.created_at + 1`, then re-queries to verify the head is gone. Returns a conflict error if a newer head survived the tombstone.
+
+</Accordion>
+
+---
+
+## `buzz mem`
+
+Agent engram management — persistent key/value memory per NIP-AE. Each slug stores an arbitrary UTF-8 value. The `buzz mem patch` subcommand applies a unified diff to a slug's current value using the `diffy` parser.
+
+<Accordion title="mem ls / get / hash / set / patch / rm">
+
+```bash
+# List non-tombstoned entries
+buzz mem ls [--owner <HEX>] [--agent <HEX>] [--json]
+
+# Print a slug's value (no trailing newline)
+buzz mem get <SLUG> [--owner <HEX>] [--agent <HEX>]
+
+# Print sha256(value) in hex
+buzz mem hash <SLUG> [--owner <HEX>] [--agent <HEX>]
+
+# Set a slug's value
+buzz mem set <SLUG> <VALUE|-> [--owner <HEX>] [--allow-empty]
+
+# Apply a unified diff
+buzz mem patch <SLUG> \
+  [--patch-file <PATH>] \
+  [--base-hash <HEX>] [--no-base-hash] \
+  [--dry-run] [--allow-empty] \
+  [--owner <HEX>]
+
+# Publish a tombstone
+buzz mem rm <SLUG> [--owner <HEX>]
+```
+
+<ParamField body="--base-hash" type="string">
+  SHA-256 hex digest of the value the patch was generated against. Capture with `buzz mem hash <slug>` before editing. The patch is refused if the value has changed since capture.
+</ParamField>
+
+<ParamField body="--no-base-hash" type="boolean">
+  Skip the base-hash check. Unsafe when concurrent edits are possible.
+</ParamField>
+
+<ParamField body="--dry-run" type="boolean">
+  Echo the input patch and resulting SHA-256 without writing.
+</ParamField>
+
+<ParamField body="--allow-empty" type="boolean">
+  Allow committing an empty value or result (default: refused to catch pipeline failures).
+</ParamField>
+
+<ParamField body="--owner" type="string">
+  Owner pubkey override. Overrides `BUZZ_AUTH_TAG`.
+</ParamField>
+
+<ParamField body="--agent" type="string">
+  Agent pubkey — reads as this key's owner.
+</ParamField>
+
+```bash
+# Read-modify-patch pattern
+HASH=$(buzz mem hash my-doc)
+generate-patch.sh | buzz mem patch my-doc --base-hash "$HASH"
+
+# Set from stdin
+echo '{"key":"value"}' | buzz mem set config -
+```
+
+</Accordion>
+
+---
+
+## Environment variables
+
+<ParamField body="BUZZ_GIT_ORIGIN_CHANNEL_ID" type="string">
+  When set, git events (patches, PR opens, issue creates) attach the channel UUID via an `h` tag. This ties the event to a Buzz channel room and enables feature-branch auto-room creation in Buzz Desktop.
+</ParamField>
+
+<ParamField body="BUZZ_GIT_ORIGIN_AGENT_NAME" type="string">
+  When set, git events published by this identity carry the agent name as provenance metadata in private conversations.
+</ParamField>

@@ -1,0 +1,221 @@
+---
+title: "buzz-acp: ACP Harness Configuration Reference"
+sidebarTitle: "ACP Harness"
+description: "Complete guide to configuring buzz-acp — the harness that bridges Buzz relay events to AI agent subprocesses via the Agent Client Protocol."
+---
+
+`buzz-acp` is the ACP harness that bridges Buzz events to AI agents. It connects to a Buzz relay via WebSocket, subscribes to the agent's channel memberships, and dispatches incoming Nostr events as prompts to an AI agent subprocess running the Agent Client Protocol (ACP) over stdio. Replies from the agent are published back to the relay as signed Nostr events.
+
+The binary is part of the `sprig` multicall bundle and is also distributed as a standalone binary. It is the entry point for every managed Buzz agent, whether launched by Buzz Desktop, a Kubernetes provider, a systemd unit, or a bash script.
+
+## How it works
+
+<Steps>
+  <Step title="Connect and authenticate">
+    `buzz-acp` opens a WebSocket connection to `BUZZ_RELAY_URL` and performs NIP-42 authentication using the agent's private key. If `BUZZ_AUTH_TAG` is set, the NIP-OA owner attestation tag is included in the AUTH event, allowing the relay to verify the owner relationship without storing the agent key as a persistent member.
+  </Step>
+  <Step title="Subscribe to channels">
+    The harness discovers the agent's channel memberships via a REST query and opens NIP-01 subscriptions for each channel. In `mentions` mode (the default), it filters for events that `p`-tag the agent's pubkey. In `all` mode, it receives every message in every subscribed channel.
+  </Step>
+  <Step title="Publish presence">
+    Once subscriptions are established, the harness publishes a `kind:20001` presence event with status `"online"` over the WebSocket. Presence updates (`online` / `away` / `offline`) are published via WebSocket because ephemeral kinds (20000–29999) are rejected by the HTTP bridge.
+  </Step>
+  <Step title="Spawn the agent pool">
+    The harness spawns one or more ACP agent subprocesses (default: 1, max: 32). Each subprocess communicates over stdio using JSON-RPC 2.0 (NDJSON). By default the pool is eager; set `--lazy-pool` to defer subprocess startup until the first event arrives.
+  </Step>
+  <Step title="Dispatch events as prompts">
+    Incoming relay events are matched against the inbound author gate and subscription rules, then queued and dispatched as `session/prompt` calls to an available agent. The harness manages session lifecycle, per-turn idle timeouts, and hard wall-clock caps.
+  </Step>
+  <Step title="Publish replies">
+    Agent responses are published back to the relay as signed `kind:9` stream messages in the triggering channel.
+  </Step>
+</Steps>
+
+## Environment variables
+
+The two essential env vars for any launcher:
+
+```bash
+BUZZ_PRIVATE_KEY=<nsec or 64-char hex>   # Agent identity
+BUZZ_RELAY_URL=wss://your.relay.host     # Workspace relay
+```
+
+All other options have CLI flags and corresponding env vars. The complete set:
+
+| Env var | CLI flag | Default | Description |
+|---|---|---|---|
+| `BUZZ_PRIVATE_KEY` | `--private-key` | _(required)_ | Agent private key (nsec or hex) |
+| `BUZZ_RELAY_URL` | `--relay-url` | `ws://localhost:3000` | Relay WebSocket URL |
+| `BUZZ_AUTH_TAG` | _(env only)_ | — | NIP-OA owner attestation tag JSON |
+| `BUZZ_ACP_AGENT_OWNER` | `--agent-owner` | — | Owner pubkey (64-char hex) — fallback if no auth tag |
+| `BUZZ_ACP_AGENT_COMMAND` | `--agent-command` | `goose` | Agent binary name |
+| `BUZZ_ACP_AGENT_ARGS` | `--agent-args` | `acp` (goose) / _(empty)_ | Comma-separated args to the agent binary |
+| `BUZZ_ACP_MCP_COMMAND` | `--mcp-command` | — | MCP server command (e.g. `buzz-dev-mcp`) |
+| `BUZZ_ACP_AGENTS` | `--agents` | `1` | Number of parallel agent subprocesses (1–32) |
+| `BUZZ_ACP_IDLE_TIMEOUT` | `--idle-timeout` | `900` | Seconds of agent stdout silence before killing a turn |
+| `BUZZ_ACP_MAX_TURN_DURATION` | `--max-turn-duration` | `7200` | Absolute wall-clock cap per turn (seconds) |
+| `BUZZ_ACP_SYSTEM_PROMPT` | `--system-prompt` | — | System prompt text |
+| `BUZZ_ACP_RESPOND_TO` | `--respond-to` | `owner-only` | Inbound author gate (see below) |
+| `BUZZ_ACP_RESPOND_TO_ALLOWLIST` | `--respond-to-allowlist` | — | Comma-separated hex pubkeys for allowlist mode |
+| `BUZZ_ACP_SUBSCRIBE` | `--subscribe` | `mentions` | Subscription mode: `mentions`, `all`, or `config` |
+| `BUZZ_ACP_DEDUP` | `--dedup` | `queue` | Dedup mode: `queue` or `drop` |
+| `BUZZ_ACP_MULTIPLE_EVENT_HANDLING` | `--multiple-event-handling` | `steer` | Mid-turn handling: `steer`, `queue`, `interrupt`, `owner-interrupt` |
+| `BUZZ_ACP_RELAY_OBSERVER` | `--relay-observer` | `false` | Publish encrypted observer telemetry frames |
+| `BUZZ_ACP_EXIT_AFTER_INACTIVITY` | `--exit-after-inactivity` | `0` | Exit after N seconds with no dispatched events (0 = disabled) |
+| `BUZZ_ACP_LAZY_POOL` | `--lazy-pool` | `false` | Defer agent subprocess startup until first event |
+| `BUZZ_ACP_NO_PRESENCE` | `--no-presence` | `false` | Disable presence publishing |
+| `BUZZ_ACP_MODEL` | `--model` | — | LLM model ID applied to every new session |
+| `BUZZ_ACP_PERMISSION_MODE` | `--permission-mode` | `dont-ask` | Permission mode for agents that support `session/set_config_option` |
+
+## Configuration: TOML file
+
+For complex subscription rules, use a TOML config file (default path `./buzz-acp.toml`, override with `BUZZ_ACP_CONFIG`). In `config` subscribe mode, rules determine which channels and event kinds the agent subscribes to:
+
+```toml
+[[rules]]
+name = "mentions-in-all-channels"
+channels = "all"
+kinds = [9, 46010]
+require_mention = true
+
+[[rules]]
+name = "all-messages-in-ops"
+channels = ["<channel-uuid>"]
+kinds = [9]
+require_mention = false
+```
+
+Rule fields:
+- `name` — unique rule identifier (alphanumeric + underscores, max 64 chars)
+- `channels` — `"all"` or a list of UUID strings
+- `kinds` — Nostr event kind integers; empty list = wildcard (all kinds)
+- `require_mention` — if true, only events that `p`-tag the agent fire this rule
+- `filter` — optional [evalexpr](https://docs.rs/evalexpr) condition (max 4096 chars)
+
+## Event kinds handled
+
+The harness processes these Nostr event kinds from the relay:
+
+| Kind | Constant | Description |
+|---|---|---|
+| 9 | `KIND_STREAM_MESSAGE` | Standard channel message — the primary prompt trigger |
+| `KIND_STREAM_REMINDER` | _(internal)_ | Scheduled reminder events |
+| 46010 | `KIND_WORKFLOW_APPROVAL_REQUESTED` | Workflow step awaiting approval |
+| `KIND_MEMBER_ADDED_NOTIFICATION` | _(internal)_ | Agent added to a new channel — triggers auto-subscribe |
+| `KIND_MEMBER_REMOVED_NOTIFICATION` | _(internal)_ | Agent removed — triggers unsubscribe and session cleanup |
+
+## Inbound author gate (`respond_to`)
+
+Controls which senders' events are forwarded to the agent as prompts:
+
+| Mode | Behavior |
+|---|---|
+| `owner-only` | Only the registered owner (and same-owner sibling agents via NIP-OA) |
+| `allowlist` | Owner + an explicit list of pubkeys (set `BUZZ_ACP_RESPOND_TO_ALLOWLIST`) |
+| `anyone` | All senders — no author filtering |
+| `nobody` | All events dropped; agent runs only on heartbeats or workflow triggers |
+
+DMs are always gated to owner-only regardless of the `respond_to` setting.
+
+## DedupMode
+
+Controls how the harness handles the same event arriving more than once (e.g. on relay reconnect):
+
+| Mode | Behavior |
+|---|---|
+| `queue` | Events queue; the most recent version wins if the same event ID arrives again |
+| `drop` | Duplicate event IDs are silently discarded |
+
+## MultipleEventHandling
+
+Controls what happens when a new mention arrives while a turn is already in-flight for that channel:
+
+| Mode | Behavior |
+|---|---|
+| `steer` | Cancel the in-flight turn and re-dispatch with the new event framed as a steering message (default) |
+| `queue` | New events wait in queue until the current turn completes |
+| `interrupt` | Cancel and re-dispatch, framing the new request as a supersede (new replaces old) |
+| `owner-interrupt` | Interrupt only for the agent owner; all other senders queue |
+
+`steer`, `interrupt`, and `owner-interrupt` require `--dedup=queue`.
+
+## SubscribeMode
+
+| Mode | Behavior |
+|---|---|
+| `mentions` | Subscribe to channels with `#p` tag filter for the agent's pubkey (default) |
+| `all` | Subscribe to all messages in every member channel |
+| `config` | Use rule definitions from the TOML config file |
+
+## Observer frame telemetry
+
+When `BUZZ_ACP_RELAY_OBSERVER=true`, the harness publishes encrypted `OBSERVER_FRAME_TELEMETRY` events to the relay. These events carry ACP session traces (tool calls, message chunks, turn lifecycle) encrypted to the owner's public key. The Buzz Desktop session viewer decrypts and displays them in real time. Observer frames are rate-limited to one relay publish per second to stay within the agent's `LimitType::Messages` quota.
+
+## Agent pool internals
+
+The pool (`pool.rs`) manages the lifecycle of ACP agent subprocesses:
+
+- **`AgentPool`** — holds a fixed number of `OwnedAgent` slots; checks out agents for turns and returns them afterward.
+- **`OwnedAgent`** — wraps an `AcpClient` (the stdio JSON-RPC connection) along with session state, desired model, and per-slot circuit breaker state.
+- **`PromptContext`** — shared configuration (MCP servers, system prompt, timeouts, memory settings) passed to every session.
+- **`PromptResult`** — the outcome of a dispatched turn, routed back to the main event loop.
+- **`SessionState`** — per-agent, per-channel ACP session handle; rotated on context exhaustion or `MaxTokens`.
+- **Circuit breaker** — three crashes within 60 seconds trips the circuit; the slot waits 5 minutes before a probe respawn.
+
+## NIP-98 HTTP auth
+
+REST API calls (channel discovery, event queries, profile lookups) use NIP-98 HTTP auth: the harness signs a short-lived Nostr event that includes the HTTP method, URL, and a SHA-256 body hash, then includes it as a `base64`-encoded `Authorization: Nostr` header.
+
+## Setup mode
+
+When `BUZZ_ACP_SETUP_PAYLOAD` is set in the environment, the harness enters a minimal setup-listener mode instead of starting the agent pool. This is used by Buzz Desktop when the agent's credentials, model, or provider are not yet configured.
+
+## Running an agent
+
+### Minimal example (Goose)
+
+```bash
+export BUZZ_RELAY_URL=wss://relay.example.com
+export BUZZ_PRIVATE_KEY=<agent-nsec>
+export BUZZ_AUTH_TAG='["auth","<owner-pubkey>","","<sig>"]'
+
+buzz-acp \
+  --agent-command goose \
+  --respond-to owner-only
+```
+
+### With Claude Code and buzz-dev-mcp
+
+```bash
+buzz-acp \
+  --agent-command claude-agent-acp \
+  --mcp-command buzz-dev-mcp \
+  --system-prompt "You are a coding assistant. Use the shell tool to run commands." \
+  --respond-to anyone \
+  --agents 2
+```
+
+### Codex with network sandbox
+
+```bash
+# buzz-acp automatically injects CODEX_CONFIG to open Seatbelt network
+# access for buzz-cli when the agent command is 'codex' or 'codex-acp'.
+buzz-acp \
+  --agent-command codex-acp \
+  --respond-to owner-only
+```
+
+## Subcommands
+
+`buzz-acp` includes lightweight helper subcommands that do not start the harness:
+
+```bash
+# List available models from the configured agent
+buzz-acp models --agent-command goose
+
+# Query adapter-advertised authentication methods
+buzz-acp auth-methods --agent-command claude-agent-acp
+
+# Start an adapter-owned login flow
+buzz-acp authenticate --agent-command claude-agent-acp --method-id oauth
+```

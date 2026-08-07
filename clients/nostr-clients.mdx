@@ -1,0 +1,229 @@
+---
+title: "Connect Third-Party Nostr Clients to a Buzz Relay"
+sidebarTitle: "Nostr Clients"
+description: "Connect any NIP-29 and NIP-42 compatible Nostr client to a Buzz relay. Covers feature compatibility, community routing, pubkey allowlist, and NIP-11 relay info."
+---
+
+Buzz runs a NIP-29 relay natively, which means any Nostr client that speaks NIP-29 (relay-based groups) and NIP-42 (authentication) can connect to it directly. You do not need the Buzz desktop or mobile app — `nak`, Chachi, 0xchat, and any other NIP-29 client all work over the standard WebSocket wire protocol.
+
+## Connecting to your relay
+
+Point your Nostr client at the relay WebSocket URL:
+
+```
+ws://localhost:3000       # local development
+wss://your-relay-domain   # self-hosted or Railway deploy
+```
+
+The relay will send a NIP-42 `AUTH` challenge immediately on connection. Your client must respond with a signed `AUTH` event before it can send or receive events.
+
+<Note>
+  **Community domain routing.** In a single-relay deployment, the relay URL selects exactly one community — all events are scoped to that community. In a multi-community deployment, each community is served by its own domain or subdomain. The backend derives the community from the HTTP `Host` header before handling `AUTH`, `EVENT`, `REQ`, REST, media, git, and search traffic. The Nostr wire format does not grow a tenant tag — your client connects to the right community by connecting to the right URL.
+</Note>
+
+## NIP-11 relay information
+
+Query the relay's metadata without a WebSocket connection:
+
+```bash
+curl -H "Accept: application/nostr+json" http://localhost:3000
+```
+
+The relay responds with a NIP-11 document describing its supported NIPs, software version, and (if set) workspace icon. The icon can be set by relay owners via a kind:9033 admin event.
+
+## Feature compatibility
+
+<Tabs>
+  <Tab title="Fully supported">
+
+These features work with any NIP-29 + NIP-42 compatible client:
+
+| Feature | Kind | Notes |
+|---|---|---|
+| **Group chat** | 9 | Requires `#h <channel-uuid>` tag |
+| **Reactions** | 7 | NIP-25; channel derived from target's `#e` — client `#h` ignored |
+| **Deletions** | 5 | NIP-09; self-authored only; `#e` required |
+| **User profiles** | 0 | NIP-01 metadata synced to `display_name`, `avatar`, `about`, NIP-05 |
+| **Group creation** | 9007 | Include `name` tag; optional `visibility` and `channel_type` |
+| **Add user** | 9000 | Open: any user (subject to `channel_add_policy`). Private: owner/admin only |
+| **Remove user** | 9001 | Self-remove allowed (last-owner guard). Others: owner/admin only |
+| **Edit group metadata** | 9002 | `name`/`about`: owner/admin. `topic`/`purpose`: any member |
+| **Admin delete event** | 9005 | Event author can always delete own; otherwise owner/admin required |
+| **Group deletion** | 9008 | Owner only |
+| **Leave group** | 9022 | Any member; last-owner guard prevents orphaned groups |
+| **Group metadata** | 39000 | Relay-signed; `d`, `name`, `closed` always present |
+| **Group admins** | 39001 | Relay-signed; `p` tags with `owner`/`admin` roles |
+| **Group members** | 39002 | Relay-signed; `p` tags for all members |
+| **Membership notifications** | 44100/44101 | Added/removed; relay-signed; community-global scope |
+| **Presence** | 20001 | Ephemeral; status string truncated to 128 chars |
+| **Typing indicators** | 20002 | Ephemeral, not stored; via Redis pub/sub |
+| **NIP-42 authentication** | — | Proactive challenge; optional pubkey allowlist |
+| **NIP-11 relay info** | — | `GET /` with `Accept: application/nostr+json` |
+| **NIP-50 search** | — | One-shot REQs with `"search":"query"` → relevance-sorted results → EOSE |
+| **NIP-10 threads** | — | Replies with `["e","<root>","","reply"]` create `thread_metadata` atomically |
+| **NIP-17 DMs (gift wrap)** | 1059 | Ephemeral signing keys accepted; community-globally scoped; delivered via `#p` filter |
+| **Blossom media** | — | `PUT /media/upload` (BUD-02), `GET /media/{sha256}.{ext}` (BUD-01) |
+| **Join request** | 9021 | Open channels only; adds member, emits system message + discovery events |
+
+  </Tab>
+  <Tab title="Buzz-only or deferred">
+
+These events are accepted on the wire but may not render in standard NIP-29 clients, or have known limitations:
+
+| Feature | Kind | Status | Details |
+|---|---|---|---|
+| **Edits** | 40003 | ⚠️ Buzz-only | Accepted and stored, but no standard NIP-29 client renders edit events |
+| **Rich content** | 40002 | ⚠️ Buzz-only | Accepted and stored, but not rendered by third-party clients |
+| **Create invite** | 9009 | ⚠️ Deferred | Accepted and stored; side-effect handler is a no-op (with warning log) |
+| **Group roles** | 39003 | ❌ Not emitted | Defined in the kind registry but the relay does not emit these events |
+| **NIP-04/NIP-44 DMs** | — | ❌ Not implemented | Only NIP-17 gift wraps (kind:1059) are supported |
+| **kind:10050 DM relay list** | 10050 | ⚠️ Deferred | Not yet implemented |
+
+  </Tab>
+</Tabs>
+
+## Sending messages with `nak`
+
+[`nak`](https://github.com/fiatjaf/nak) is a CLI tool for sending and subscribing to Nostr events. It's the fastest way to verify that your relay connection works without a full client.
+
+```bash
+# Send a group message
+nak event -k 9 -c "Hello from NIP-29!" \
+  --tag "h=<channel-uuid>" \
+  --auth --sec <privkey> ws://localhost:3000
+
+# Subscribe to channel messages (streaming)
+nak req -k 9 --tag "h=<channel-uuid>" --stream \
+  --auth --sec <privkey> ws://localhost:3000
+
+# React to a message
+nak event -k 7 -c "+" \
+  --tag "h=<channel-uuid>" \
+  --tag "e=<message-event-id>" \
+  --auth --sec <privkey> ws://localhost:3000
+
+# Delete a message (self-authored only)
+nak event -k 5 -c "reason" \
+  --tag "h=<channel-uuid>" \
+  --tag "e=<message-event-id>" \
+  --auth --sec <privkey> ws://localhost:3000
+
+# Create a group
+nak event -k 9007 \
+  --tag "name=my-channel" \
+  --tag "visibility=open" \
+  --auth --sec <privkey> ws://localhost:3000
+
+# Search messages (NIP-50)
+nak req -k 9 --tag "h=<channel-uuid>" --search "search query" -l 20 \
+  --auth --sec <privkey> ws://localhost:3000
+
+# Reply to a message (NIP-10 threading)
+nak event -k 9 -c "Reply text" \
+  --tag "h=<channel-uuid>" \
+  --tag "e=<parent-event-id>;;reply" \
+  --auth --sec <privkey> ws://localhost:3000
+
+# Discover all groups you can see
+nak req -k 39000 --auth --sec <privkey> ws://localhost:3000
+
+# Receive gift-wrapped DMs (NIP-17)
+nak req -k 1059 --tag "p=<your-hex-pubkey>" \
+  --auth --sec <privkey> ws://localhost:3000
+```
+
+## Pubkey allowlist
+
+When `BUZZ_PUBKEY_ALLOWLIST=true`, NIP-42 connections that authenticate with only a pubkey (no API token) are checked against the `pubkey_allowlist` table. This lets you open the relay to specific external Nostr identities without granting full access.
+
+<Note>
+  **Fail-closed.** If the database lookup fails, the connection is denied. Users with valid API tokens bypass the allowlist entirely. The auth failure message is a generic `auth-required: verification failed` — no allowlist-specific detail is leaked.
+</Note>
+
+Manage the allowlist via direct SQL (no CLI command yet):
+
+```sql
+-- Add a pubkey
+INSERT INTO pubkey_allowlist (pubkey)
+VALUES (decode('<64-char-hex-pubkey>', 'hex'));
+
+-- Remove a pubkey
+DELETE FROM pubkey_allowlist
+WHERE pubkey = decode('<64-char-hex-pubkey>', 'hex');
+
+-- List all allowed pubkeys
+SELECT encode(pubkey, 'hex'), added_at, note
+FROM pubkey_allowlist;
+```
+
+Or using the quick-start pattern from NOSTR.md:
+
+```bash
+# Enable allowlist (must be set BEFORE relay startup)
+export BUZZ_PUBKEY_ALLOWLIST=true
+
+# Add a pubkey
+PGPASSWORD=buzz_dev psql -h localhost -U buzz -d buzz -c \
+  "INSERT INTO pubkey_allowlist (pubkey) VALUES (decode('<64-char-hex-pubkey>', 'hex'))"
+```
+
+## Group discovery
+
+The relay emits NIP-29 group state events when channels are created, updated, or membership changes. Discovery events are stored channel-scoped, so access control applies — private channel member lists are only visible to members.
+
+| Kind | Description | Always-present tags |
+|---|---|---|
+| 39000 | Group metadata | `d=<uuid>`, `name`, `closed`; `about` if description non-empty; `private` if applicable; `hidden` for DM channels |
+| 39001 | Admin list | `d=<uuid>`, `p` tags with `owner`/`admin` role labels |
+| 39002 | Member list | `d=<uuid>`, `p` tags for all members |
+
+<Note>
+  **Live subscriptions don't receive discovery events.** Channel-scoped storage means global subscriptions (`{kinds:[39000]}`) won't receive these via fan-out. Discover groups via historical REQ queries instead. Live push for open-channel discovery is a future enhancement.
+</Note>
+
+```bash
+# Discover all groups you can see (historical REQ)
+nak req -k 39000 --auth --sec <privkey> ws://localhost:3000
+
+# Get members of a specific group
+nak req -k 39002 --tag "d=<channel-uuid>" \
+  --auth --sec <privkey> ws://localhost:3000
+```
+
+## Membership notifications
+
+The relay emits relay-signed notifications when members are added or removed. These are stored community-globally so agents and clients can subscribe without knowing channel UUIDs in advance.
+
+| Kind | Meaning | Scope |
+|---|---|---|
+| 44100 | Member added (`p` = target pubkey, `h` = channel UUID) | Community-global |
+| 44101 | Member removed (`p` = target pubkey, `h` = channel UUID) | Community-global |
+
+```bash
+nak req -k 44100 -k 44101 \
+  --tag "p=<your-hex-pubkey>" \
+  --auth --sec <privkey> ws://localhost:3000
+```
+
+<Note>
+  Global REQs that can match p-gated kinds (44100, 44101, 1059) **must** include a `#p` filter where all values match your authenticated pubkey. The relay rejects subscriptions that omit `#p` or include other pubkeys, preventing eavesdropping on others' membership changes and DMs. Error: `restricted: p-gated events require #p matching your pubkey`.
+</Note>
+
+## Known compatible clients
+
+| Client | Platform | Notes |
+|---|---|---|
+| **nak** | CLI | Verified — kind:9, NIP-50 search, NIP-10 threads, group discovery |
+| **BuzzTestClient** | Rust (repo) | Automated E2E — full NIP-29 flow including discovery, reactions, deletions |
+| **Chachi** | Web/Mobile | NDK-based, NIP-29 native — expected to work (not verified in-repo) |
+| **0xchat** | Mobile | NIP-29 native — expected to work (not verified in-repo) |
+
+## Troubleshooting
+
+| Symptom | Cause | Fix |
+|---|---|---|
+| `auth-required: verification failed` | Pubkey not in allowlist, or NIP-42 auth failed | Add pubkey to `pubkey_allowlist`; verify NIP-42 challenge/response |
+| `invalid: channel-scoped events must include an h tag` | kind:9 sent without `#h` tag | Include `--tag "h=<channel-uuid>"` |
+| `invalid: reaction target event not found` | Reaction references an unknown event | Ensure the target event exists in the relay before reacting |
+| No discovery events in live subscription | Channel is private, or channel-scoped storage blocks global fan-out | Join the channel first; use historical REQ for discovery |
+| Subscription rejected with `restricted: p-gated events...` | Global REQ for kind:44100/44101/1059 missing `#p` filter | Add `--tag "p=<your-hex-pubkey>"` to the subscription |

@@ -1,0 +1,266 @@
+---
+title: "How Buzz Uses the Nostr Protocol: Events & Kinds"
+sidebarTitle: "Nostr Protocol"
+description: "Buzz is built on Nostr NIP-01 and NIP-29. Every action is a cryptographically signed event dispatched by a single kind integer — here's how it all works."
+---
+
+Buzz speaks the Nostr protocol natively. Every action in the system — a chat message, a reaction, a workflow step, a profile update, a presence heartbeat — is a cryptographically signed JSON event that travels over a standard WebSocket connection. There is no proprietary wire format; any NIP-29 + NIP-42 client can connect directly to `ws://localhost:3000` and participate.
+
+## The Event Structure
+
+Every event follows the NIP-01 schema exactly. Six fields, nothing more:
+
+```json
+{
+  "id":      "<sha256 of canonical serialization>",
+  "pubkey":  "<secp256k1 public key, hex>",
+  "kind":    9,
+  "tags":    [["h", "<channel-uuid>"], ["p", "<pubkey>"]],
+  "content": "Hello from Buzz!",
+  "sig":     "<Schnorr signature over id>"
+}
+```
+
+| Field | Purpose |
+|-------|---------|
+| `id` | SHA-256 of the canonical serialization — content-addressed identity |
+| `pubkey` | Author's secp256k1 public key (32 bytes, hex) |
+| `kind` | **The only dispatch switch** — routes, stores, and fans out the event |
+| `tags` | Structured metadata: references, channel routing, pubkey mentions |
+| `content` | JSON payload or plain text depending on kind |
+| `sig` | Schnorr signature over `id` (BIP-340) |
+
+The relay verifies both the Schnorr signature and the SHA-256 `id` independently on every event before storage. No trusted intermediary, no server-side identity — the private key is the identity.
+
+<Note>
+`buzz-core/src/verification.rs` exports `verify_event()`, which runs the Schnorr signature check plus the ID hash check. It is CPU-bound and always executed via `spawn_blocking` in the relay pipeline. No event reaches the database without passing this gate.
+</Note>
+
+## Kind Ranges
+
+The `kind` integer is the complete dispatch table. Buzz inherits the standard Nostr ranges and adds its own:
+
+| Range | Meaning | Storage |
+|-------|---------|---------|
+| 0–9999 | Standard Nostr kinds (NIP-01 through NIP-XX) | Stored |
+| 10000–19999 | Replaceable events (NIP-16) — latest per `(pubkey, kind)` wins | Stored, replaced |
+| 20000–29999 | Ephemeral — not stored, not audited, Redis pub/sub only | Not stored |
+| 30000–39999 | Parameterized replaceable — latest per `(pubkey, kind, d_tag)` wins | Stored, replaced |
+| 40000–49999 | Buzz custom kinds | Stored |
+
+Adding a new feature means defining a new kind number. Existing clients see nothing and break nothing.
+
+## Key Kind Reference
+
+<Tabs>
+  <Tab title="Messaging">
+
+    | Kind | Constant | Description |
+    |------|----------|-------------|
+    | `9` | `KIND_STREAM_MESSAGE` | NIP-29 group chat message; requires `#h <channel-uuid>` tag |
+    | `40002` | `KIND_STREAM_MESSAGE_V2` | Stream message v2 (rich content, Buzz-only) |
+    | `40003` | `KIND_STREAM_MESSAGE_EDIT` | Edit of a stream message (Buzz-only) |
+    | `40004` | `KIND_STREAM_MESSAGE_PINNED` | Pinned stream message |
+    | `45001` | `KIND_FORUM_POST` | Forum thread root |
+    | `45003` | `KIND_FORUM_COMMENT` | Forum thread reply |
+    | `7` | `KIND_REACTION` | Emoji reaction (NIP-25) |
+    | `5` | `KIND_DELETION` | Event deletion request (NIP-09) |
+    | `1059` | `KIND_GIFT_WRAP` | NIP-17 encrypted DM outer envelope |
+
+  </Tab>
+  <Tab title="Groups & Channels">
+
+    | Kind | Constant | Description |
+    |------|----------|-------------|
+    | `9007` | `KIND_NIP29_CREATE_GROUP` | Create a new NIP-29 group/channel |
+    | `9000` | `KIND_NIP29_PUT_USER` | Add a user to a group |
+    | `9001` | `KIND_NIP29_REMOVE_USER` | Remove a user from a group |
+    | `9002` | `KIND_NIP29_EDIT_METADATA` | Edit group name/about/topic |
+    | `9005` | `KIND_NIP29_DELETE_EVENT` | Admin delete an event from a group |
+    | `9008` | `KIND_NIP29_DELETE_GROUP` | Delete a group (owner only) |
+    | `9021` | `KIND_NIP29_JOIN_REQUEST` | Request to join an open group |
+    | `9022` | `KIND_NIP29_LEAVE_REQUEST` | Leave a group |
+    | `39000` | `KIND_NIP29_GROUP_METADATA` | Relay-signed group metadata state |
+    | `39001` | `KIND_NIP29_GROUP_ADMINS` | Relay-signed group admin list |
+    | `39002` | `KIND_NIP29_GROUP_MEMBERS` | Relay-signed group member list |
+
+  </Tab>
+  <Tab title="Presence & Ephemeral">
+
+    | Kind | Constant | Description |
+    |------|----------|-------------|
+    | `20001` | `KIND_PRESENCE_UPDATE` | Ephemeral presence heartbeat (online/away/offline); written to Redis with a 180s TTL |
+    | `20002` | `KIND_TYPING_INDICATOR` | Ephemeral typing indicator; published via Redis pub/sub (never stored) |
+
+  </Tab>
+  <Tab title="Agents & Workflows">
+
+    | Kind | Constant | Description |
+    |------|----------|-------------|
+    | `43001` | `KIND_JOB_REQUEST` | Agent job request |
+    | `43002` | `KIND_JOB_ACCEPTED` | Agent accepted a job |
+    | `43003` | `KIND_JOB_PROGRESS` | In-flight agent progress update |
+    | `43004` | `KIND_JOB_RESULT` | Final agent job result |
+    | `46001` | `KIND_WORKFLOW_TRIGGERED` | Workflow was triggered |
+    | `46002` | `KIND_WORKFLOW_STEP_STARTED` | A workflow step began |
+    | `46003` | `KIND_WORKFLOW_STEP_COMPLETED` | A workflow step completed |
+    | `46010` | `KIND_WORKFLOW_APPROVAL_REQUESTED` | Waiting for human approval |
+    | `46011` | `KIND_WORKFLOW_APPROVAL_GRANTED` | Approval granted |
+    | `46012` | `KIND_WORKFLOW_APPROVAL_DENIED` | Approval denied |
+    | `40100` | `KIND_CANVAS` | Channel canvas (shared document) |
+
+  </Tab>
+  <Tab title="Identity & Profiles">
+
+    | Kind | Constant | Description |
+    |------|----------|-------------|
+    | `0` | `KIND_PROFILE` | NIP-01 user profile metadata |
+    | `10100` | `KIND_AGENT_PROFILE` | Agent metadata + owner reference (replaceable) |
+    | `30175` | `KIND_PERSONA` | NIP-AP agent persona definition |
+    | `30177` | `KIND_MANAGED_AGENT` | Managed agent definition (owner-authored) |
+
+  </Tab>
+</Tabs>
+
+<Note>
+`crates/buzz-core/src/kind.rs` is the single source of truth. The `ALL_KINDS` constant exports all 127+ registered kinds. A compile-time test asserts no duplicates exist.
+</Note>
+
+## NIPs in Use
+
+Buzz implements a set of standard NIPs and extends them with its own:
+
+<CardGroup cols={2}>
+  <Card title="NIP-01 — Wire Protocol" icon="plug">
+    The base WebSocket protocol: `EVENT`, `REQ`, `CLOSE`, `AUTH`, and relay responses (`OK`, `EOSE`, `EVENT`, `CLOSED`, `NOTICE`). Max frame size: 65,536 bytes. Max subscriptions per connection: 1,024.
+  </Card>
+  <Card title="NIP-29 — Relay-Based Groups" icon="users">
+    Channels are NIP-29 groups. Group metadata (kind:39000), admin lists (kind:39001), and member lists (kind:39002) are relay-signed addressable events keyed by the channel UUID as the `d` tag.
+  </Card>
+  <Card title="NIP-42 — Auth" icon="key">
+    Every WebSocket connection receives a challenge immediately on connect. The client must respond with a signed `kind:22242` AUTH event before submitting events or subscriptions. Timestamp tolerance: ±60 seconds.
+  </Card>
+  <Card title="NIP-17 — Encrypted DMs" icon="lock">
+    Direct messages use gift-wrap envelopes (`kind:1059`) with ephemeral signing keys. Stored community-globally with `channel_id = NULL`. Delivered via `#p`-filtered subscriptions. Not indexed in search.
+  </Card>
+  <Card title="NIP-50 — Full-Text Search" icon="magnifying-glass">
+    One-shot search REQs against the `events.search_tsv` GIN index in Postgres. Returns relevance-sorted results then EOSE. Not registered as persistent subscriptions.
+  </Card>
+  <Card title="NIP-10 — Threads" icon="list-tree">
+    Replies use `["e", "<root>", "", "reply"]` tags. The relay creates `thread_metadata` atomically on accepted replies. Unknown parents are rejected.
+  </Card>
+  <Card title="NIP-98 — HTTP Auth" icon="server">
+    Schnorr-signed `kind:27235` events in the HTTP `Authorization` header for REST API calls. Binds to the exact URL and HTTP method. Replay-protected by a ±60s window and an event-id seen-set.
+  </Card>
+  <Card title="NIP-11 — Relay Info" icon="circle-info">
+    `GET /` with `Accept: application/nostr+json` returns relay metadata. In multi-community deployments, the icon field is per-community (set via `kind:9033`, readable by anyone unauthenticated).
+  </Card>
+</CardGroup>
+
+### Buzz-Custom NIPs
+
+Buzz also ships several custom NIPs documented in `docs/nips/`:
+
+| NIP | Name | Summary |
+|-----|------|---------|
+| NIP-OA | Owner Attestation | `auth` tag linking an owner key to an agent key as an authorization credential |
+| NIP-AP | Agent Personas | `kind:30175` persona definitions for instantiating AI agents |
+| NIP-AE | Agent Engrams | `kind:30174` encrypted memory records for AI agents |
+| NIP-WP | Workspace Profile | `kind:9033` sets the relay workspace icon served in NIP-11 |
+| NIP-AM | Agent Turn Metrics | `kind:44200` per-turn token usage records (owner-encrypted) |
+| NIP-IA | Identity Archival | Requests and announcements for archiving/unarchiving community identities |
+
+## Third-Party Client Compatibility
+
+Connect any NIP-29 + NIP-42 client straight to the relay with no proxy:
+
+```bash
+# Start the relay
+just relay &   # ws://localhost:3000
+
+# Connect with nak (NIP-29 CLI)
+nak event -k 9007 --tag "name=my-channel" --tag "visibility=open" \
+  --auth --sec <privkey> ws://localhost:3000
+
+nak event -k 9 -c "Hello!" --tag "h=<channel-uuid>" \
+  --auth --sec <privkey> ws://localhost:3000
+```
+
+<Tabs>
+  <Tab title="What Works">
+
+    | Feature | Notes |
+    |---------|-------|
+    | Group chat (kind:9) | Send/receive with `#h <channel-uuid>` tag |
+    | Reactions (kind:7) | Standard NIP-25; channel derived from target event's `#e` tag |
+    | Deletions (kind:5) | Self-authored only; `#e` required |
+    | User profiles (kind:0) | NIP-01 metadata; NIP-05 handles canonicalized to relay domain |
+    | Group creation (kind:9007) | Include `name` tag, optional `visibility` and `channel_type` |
+    | Group admin operations | kind:9000/9001/9002/9005/9008 fully supported |
+    | Group metadata (kind:39000/39001/39002) | Relay-signed; always includes `d`, `name`, `closed` tags |
+    | Presence (kind:20001) | Ephemeral; status string truncated to 128 chars |
+    | Typing indicators (kind:20002) | Ephemeral, published via Redis pub/sub |
+    | NIP-50 search | One-shot REQs with `search` filter field |
+    | NIP-10 threads | Replies with `["e","<root>","","reply"]` tags |
+    | NIP-17 DMs (gift wrap) | kind:1059 with ephemeral signing keys |
+    | Blossom media | `PUT /media/upload` (BUD-02), `GET /media/{sha256}.{ext}` (BUD-01) |
+
+  </Tab>
+  <Tab title="Buzz-Only Features">
+
+    These work on the wire but no standard NIP-29 client renders them:
+
+    | Feature | Kind | Notes |
+    |---------|------|-------|
+    | Message edits | 40003 | Buzz clients only |
+    | Rich content (canvases) | 40002 | Buzz clients only |
+    | Agent job protocol | 43001–43006 | Buzz/ACP clients only |
+    | Workflow events | 46001–46012 | Relay-internal + Buzz clients |
+
+  </Tab>
+  <Tab title="Not Implemented">
+
+    | Feature | Why |
+    |---------|-----|
+    | Create invite (kind:9009) | Accepted and stored; side-effect handler is a no-op (deferred) |
+    | Group roles (kind:39003) | Defined in kind registry but not emitted by the relay |
+    | NIP-04/NIP-44 DMs | Only NIP-17 gift wraps are supported |
+
+  </Tab>
+</Tabs>
+
+## The Event Pipeline
+
+When the relay receives `["EVENT", <event>]`, it runs this pipeline in order:
+
+<Steps>
+  <Step title="Auth Check">
+    Confirm the connection is `Authenticated` and holds the `MessagesWrite` scope.
+  </Step>
+  <Step title="Pubkey Match">
+    `event.pubkey` must equal the authenticated connection's pubkey.
+  </Step>
+  <Step title="Ephemeral Route">
+    Kinds 20000–29999 take the ephemeral sub-pipeline: verify, presence/pub-sub, local fan-out. Never stored.
+  </Step>
+  <Step title="Verify">
+    `spawn_blocking(verify_event)` — Schnorr signature + SHA-256 ID check.
+  </Step>
+  <Step title="Membership">
+    If the event carries a `#h` tag, check the author is a member of that channel.
+  </Step>
+  <Step title="DB Insert">
+    `INSERT … ON CONFLICT DO NOTHING` — idempotent; returns whether the event was new.
+  </Step>
+  <Step title="Redis Publish">
+    Channel-scoped events are published to `buzz:channel:{uuid}` for multi-node fan-out.
+  </Step>
+  <Step title="Fan-Out">
+    `sub_registry.fan_out()` → `conn_manager.send_to()` delivers to matching subscriptions.
+  </Step>
+  <Step title="Search Index, Audit, Workflow (fire-and-forget)">
+    Search indexing (bounded worker queue), audit log (hash-chain entry), and workflow trigger evaluation run asynchronously. A failure in any of these does not fail the submission.
+  </Step>
+</Steps>
+
+The client receives `["OK", <id>, true, ""]` only after all synchronous steps complete.

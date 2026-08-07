@@ -1,0 +1,204 @@
+---
+title: "Deploying Buzz: Dev to Production Setup Guide"
+sidebarTitle: "Deployment"
+description: "Run a Buzz relay locally with Docker Compose or ship it to production with Helm. Covers prerequisites, dev setup, and production deployment options."
+---
+
+Buzz ships as a single `buzz-relay` binary (built from a Rust workspace) backed by Postgres 17, Redis 7, and S3-compatible object storage. The root `docker-compose.yml` stands up a full local dev stack in seconds; the Helm chart at `deploy/charts/buzz` targets Kubernetes for production. Both paths are covered here.
+
+## Prerequisites
+
+You need [Docker](https://docs.docker.com/get-docker/) plus either **Hermit** (recommended — pins all tool versions automatically) or a manually installed toolchain.
+
+<CardGroup cols={2}>
+  <Card title="Hermit (recommended)" icon="wand-magic-sparkles">
+    [Hermit](https://cashapp.github.io/hermit/) manages the entire toolchain from `bin/`. Activate it once and every `just` command uses the pinned versions — no global installs required.
+  </Card>
+  <Card title="Manual toolchain" icon="wrench">
+    Install **Rust 1.88+**, **Node 24+**, **pnpm 10+**, and **just** globally. Docker must still be available for the backing services.
+  </Card>
+</CardGroup>
+
+<Tip>
+  Use Hermit. It downloads and pins Rust, Node, pnpm, `just`, and every other CLI the repo needs on first use. Running `. ./bin/activate-hermit` is the only step required — no version conflicts, no global installs, no drift between contributors.
+</Tip>
+
+## Quick Start (development)
+
+<Steps>
+  <Step title="Clone and activate Hermit">
+    ```bash
+    git clone https://github.com/block/buzz.git && cd buzz
+    . ./bin/activate-hermit
+    ```
+    Hermit auto-downloads pinned tool versions into `bin/` on first use.
+  </Step>
+
+  <Step title="Bootstrap the environment">
+    ```bash
+    just setup
+    ```
+    `just setup` runs `just bootstrap` automatically: copies `.env.example` to `.env` if it doesn't exist, downloads toolchain via Hermit, starts Docker services, and runs database migrations. You can also run `just bootstrap` independently to set up the toolchain without starting services.
+  </Step>
+
+  <Step title="Build the workspace">
+    ```bash
+    just build
+    ```
+    Compiles the full Rust workspace. Required before the first `just dev` run.
+  </Step>
+
+  <Step title="Start the relay and desktop app">
+    ```bash
+    just dev
+    ```
+    Builds and starts `buzz-relay` on `ws://localhost:3000`, waits for readiness, then launches the Tauri desktop app. For a split-terminal workflow, run `just relay` in one terminal and `just desktop-dev` in another.
+  </Step>
+</Steps>
+
+## Docker Compose Services (dev stack)
+
+The root `docker-compose.yml` defines the full local development stack. All services join the `buzz-net` bridge network and carry health checks.
+
+| Service | Image | Port | Memory limit |
+|---------|-------|------|--------------|
+| Postgres 17 | `postgres:17-alpine` | `5432` | 512 MB |
+| Redis 7 | `redis:7-alpine` | `6379` | 128 MB |
+| Adminer | `adminer:latest` | `8082` | 64 MB |
+| MinIO | `minio/minio:latest` | `9000` (API), `9001` (console) | 256 MB |
+| Keycloak | `keycloak:26.0` | `8180` | 512 MB |
+| Prometheus | `prom/prometheus:latest` | `9090` | 128 MB |
+
+**Health checks:**
+- **Postgres:** `pg_isready -U buzz` — interval 5 s, 10 retries, start period 10 s
+- **Redis:** `redis-cli ping` — interval 5 s, 10 retries, start period 5 s
+
+Default dev credentials: user `buzz`, password `buzz_dev`, database `buzz`. Adminer points to the Postgres container at `http://localhost:8082`.
+
+```yaml
+# docker-compose.yml (excerpt)
+services:
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_USER: buzz
+      POSTGRES_PASSWORD: buzz_dev
+      POSTGRES_DB: buzz
+    ports:
+      - "5432:5432"
+    deploy:
+      resources:
+        limits:
+          memory: 512m
+```
+
+## The buzz-relay Binary
+
+`buzz-relay` is the single source of truth. It binds to `0.0.0.0:3000` by default (`BUZZ_BIND_ADDR`), exposing:
+
+- **WebSocket** at `ws://localhost:3000` — NIP-01 relay protocol, NIP-42 auth
+- **REST** at `http://localhost:3000/events`, `/query`, `/count`, `/media/*`, `/git/*`
+- **Health** at `http://localhost:3000/_liveness` and `/_readiness`
+
+The relay embeds database migrations via `sqlx::migrate!` and runs them at startup (gated by `BUZZ_AUTO_MIGRATE`, default `true`). Schema migrations run behind a Postgres advisory lock and are safe under multiple concurrent replicas.
+
+## `just` Task Reference
+
+<Accordion title="Common dev commands">
+
+| Command | What it does |
+|---------|-------------|
+| `just setup` | Start Docker services, run migrations, install desktop deps |
+| `just dev` | Build and start the relay + Tauri desktop app together |
+| `just relay` | Start only the relay (auto-starts Docker services if needed) |
+| `just build` | Build the Rust workspace (`cargo build --workspace`) |
+| `just ci` | Run everything CI runs: checks, unit tests, desktop build |
+| `just test` | Full test suite (unit + integration; starts services if needed) |
+| `just test-unit` | Unit tests only — no Docker or infra required |
+| `just reset` | ⚠ Wipe all development data and recreate a clean environment |
+| `just down` | Stop all dev services (data is preserved) |
+| `just ps` | Show dev service status |
+| `just logs` | Tail all service logs |
+| `just check` | Run `fmt + clippy + desktop check` |
+
+</Accordion>
+
+## Production Deployment
+
+For production use a dedicated compose bundle or the Helm chart — **not** the root `docker-compose.yml`, which is for local development only.
+
+<CardGroup cols={2}>
+  <Card title="Docker Compose (VPS / single-node)" icon="docker">
+    Use the production Compose bundle in `deploy/compose/` for single-node or VPS deployments. It includes Postgres, Redis, MinIO, and optional Caddy/TLS.
+  </Card>
+  <Card title="Helm (Kubernetes)" icon="dharmachakra">
+    The chart at `deploy/charts/buzz` is the recommended path for Kubernetes. GitOps-safe with ArgoCD and Flux.
+  </Card>
+</CardGroup>
+
+### Helm Chart Deployment
+
+The chart at `deploy/charts/buzz` has two operating profiles:
+
+**Quickstart (eval only)** — bundles in-cluster Postgres, Redis, and MinIO:
+
+```bash
+helm install buzz oci://ghcr.io/block/buzz/charts/buzz --version 0.1.7 \
+  --create-namespace --namespace buzz \
+  --set quickstart=true \
+  --set postgresql.enabled=true \
+  --set redis.enabled=true \
+  --set minio.enabled=true \
+  --set relayUrl=wss://buzz.example.com \
+  --set ownerPubkey=<64-char-hex-pubkey>
+```
+
+**Production (GitOps)** — external Postgres, Redis, and S3; uses a pre-created Secret:
+
+```yaml
+# values.yaml (production)
+relayUrl: "wss://buzz.example.com"
+ownerPubkey: "<64-char-hex-pubkey>"
+replicaCount: 2
+
+secrets:
+  existingSecret: "buzz-relay-secret"
+
+externalPostgresql:
+  url: "postgres://buzz:pass@db.internal:5432/buzz"
+
+externalRedis:
+  url: "redis://:pass@redis.internal:6379"
+
+s3:
+  endpoint: "https://s3.us-east-1.amazonaws.com"
+  bucket: "buzz-media"
+  region: "us-east-1"
+  addressingStyle: virtual
+```
+
+```bash
+helm install buzz oci://ghcr.io/block/buzz/charts/buzz \
+  --namespace buzz --create-namespace \
+  -f values.yaml
+```
+
+The chart validates required inputs at `helm install` / `helm template` time and fails with a clear message if anything is missing. See `deploy/charts/buzz/README.md` for the full reference, and `examples/argocd-app.yaml` / `examples/flux-helmrelease.yaml` for canonical GitOps configurations.
+
+<Note>
+  `replicaCount > 1` hard-requires Redis for `buzz-pubsub` fan-out. The chart fails at template time if Redis is not configured when scaling beyond one replica. Git storage is object-store-backed and does not require `ReadWriteMany` volumes — each replica can use its own `ReadWriteOnce` volume.
+</Note>
+
+### Production Secrets
+
+The relay Secret must contain:
+
+| Key | Purpose |
+|-----|---------|
+| `BUZZ_RELAY_PRIVATE_KEY` | 64-char hex relay identity key (rotation = new identity) |
+| `DATABASE_URL` | Full Postgres connection URL |
+| `REDIS_URL` | Redis URL with auth |
+| `BUZZ_S3_ACCESS_KEY` | S3 access key |
+| `BUZZ_S3_SECRET_KEY` | S3 secret key |
+
+See `deploy/charts/buzz/examples/secret-sample.yaml` for the full Secret schema.

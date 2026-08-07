@@ -1,0 +1,225 @@
+---
+title: "Buzz Mobile App: Flutter Setup for iOS and Android"
+sidebarTitle: "Mobile App"
+description: "Build and run the Buzz Flutter mobile client on iOS and Android. Covers dependencies, worktree-aware debug identities, release signing, and quality checks."
+---
+
+The Buzz mobile app is a Flutter client for iOS and Android that connects to a Buzz relay over WebSocket using the Nostr protocol. It is built with Dart SDK `^3.11.4`, uses Riverpod and Hooks for state management, and shares the same Inter and GeistMono variable fonts and Catppuccin light/dark theme as the desktop app.
+
+<Note>
+  **Active development.** The mobile client is currently being wired up. Core infrastructure — state management, Nostr protocol, secure storage, and theming — is in place, but not all desktop features are available yet. Expect rapid iteration.
+</Note>
+
+## Tech stack
+
+<CardGroup cols={2}>
+  <Card title="Framework" icon="mobile">
+    Flutter (Dart SDK `^3.11.4`) — single codebase for iOS and Android.
+  </Card>
+  <Card title="State management" icon="arrows-repeat">
+    `hooks_riverpod ^3.0.3` + `flutter_hooks ^0.21.3`. All widgets extend `HookConsumerWidget`; no cross-feature imports except `shared/`.
+  </Card>
+  <Card title="Protocol" icon="wifi">
+    `nostr ^2.0.0` over `web_socket_channel ^3.0.1`. NIP-29 group chat and NIP-42 authentication.
+  </Card>
+  <Card title="Security" icon="shield">
+    `flutter_secure_storage ^10.0.0` (Keychain/Keystore-backed) + `pointycastle ^4.0.0` for cryptographic operations.
+  </Card>
+</CardGroup>
+
+## Prerequisites
+
+- [Flutter SDK](https://docs.flutter.dev/get-started/install) `^3.11.4`
+- Xcode (for iOS) or Android Studio (for Android)
+- Docker + `just` (recommended — starts relay and simulator together)
+
+## Development setup
+
+<Steps>
+  <Step title="Clone the repo and activate the toolchain">
+    ```bash
+    git clone https://github.com/block/buzz.git && cd buzz
+    . ./bin/activate-hermit   # optional; pins Dart/Flutter versions via Hermit
+    ```
+  </Step>
+
+  <Step title="Install Flutter dependencies">
+    ```bash
+    cd mobile && flutter pub get
+    ```
+
+    Or from the repo root:
+
+    ```bash
+    just mobile-install
+    ```
+  </Step>
+
+  <Step title="Run on an iOS simulator (recommended)">
+    From the repo root — starts Docker services, the relay, and the iOS simulator together:
+
+    ```bash
+    just mobile-dev
+    ```
+
+    This applies worktree-aware debug identity overrides automatically (see below), then runs `flutter run` inside `mobile/`.
+
+    For direct Flutter control (services must already be running):
+
+    ```bash
+    cd mobile && flutter run
+    ```
+  </Step>
+
+  <Step title="Build an Android debug APK">
+    ```bash
+    just mobile-build-android
+    ```
+
+    Or directly:
+
+    ```bash
+    cd mobile && flutter build apk --debug
+    ```
+  </Step>
+</Steps>
+
+## Worktree-aware debug identity
+
+Debug builds from a git worktree get a unique app identifier keyed to the worktree directory name:
+
+- **iOS:** `com.buzz.buzzMobile.<slug>`
+- **Android:** `xyz.block.buzz.mobile.<slug>`
+
+The display name gets a branch label too (e.g. `Buzz (my-branch)`), or a short SHA when the worktree is detached. This means one worktree keeps exactly one installed app — and its login state — across branch switches, and builds from multiple worktrees install side by side.
+
+`just mobile-dev` and `just mobile-build-android` apply these overrides automatically by running `scripts/mobile-worktree-overrides.sh`, which writes two gitignored files:
+
+- `mobile/ios/Flutter/WorktreeOverrides.xcconfig` — included by Debug builds only
+- `mobile/android/worktree.properties` — read by the debug build type only
+
+For direct Xcode / Android Studio / `flutter run` development, run the script once per branch switch:
+
+```bash
+./scripts/mobile-worktree-overrides.sh
+```
+
+Release and profile builds always keep the production identity (`Buzz`) and are never affected.
+
+To remove stale worktree-suffixed installs from booted simulators and emulators:
+
+```bash
+just mobile-clean
+# Preview without removing:
+./scripts/mobile-worktree-clean.sh --dry-run
+```
+
+## Android release signing
+
+Release builds require all upload-key inputs via environment variables:
+
+```bash
+export BUZZ_ANDROID_UPLOAD_KEYSTORE_PATH=/path/to/upload-key.jks  # must be absolute
+export BUZZ_ANDROID_UPLOAD_KEYSTORE_PASSWORD=...
+export BUZZ_ANDROID_UPLOAD_KEY_ALIAS=...
+export BUZZ_ANDROID_UPLOAD_KEY_PASSWORD=...
+
+cd mobile && flutter build apk --release
+```
+
+For release pipelines that sign through a central APK Signer service instead of a local upload keystore, set:
+
+```bash
+export BUZZ_ANDROID_RELEASE_SIGNING=external
+```
+
+This produces an unsigned release bundle and refuses to run if any `BUZZ_ANDROID_UPLOAD_*` value is also set. Debug and development builds do not require any of these variables.
+
+## Code quality
+
+Run all checks from the repo root:
+
+```bash
+just mobile-check
+```
+
+Or individually:
+
+```bash
+# Format check (no writes):
+dart format --output=none --set-exit-if-changed .
+
+# Static analysis:
+flutter analyze
+
+# Tests:
+flutter test
+# or: just mobile-test
+```
+
+Auto-fix formatting:
+
+```bash
+just mobile-fix
+# or: cd mobile && dart format .
+```
+
+## Key dependencies
+
+<Accordion title="Media capture and playback">
+
+| Package | Version | Purpose |
+|---|---|---|
+| `camera` | `^0.12.0+2` | Camera access for image/video capture |
+| `image_picker` | `^1.1.2` | Photo/video picker from device library |
+| `photo_manager` | `^3.11.0` | Access device media assets |
+| `video_player` | `^2.10.1` | Inline video playback |
+
+</Accordion>
+
+<Accordion title="Communication and navigation">
+
+| Package | Version | Purpose |
+|---|---|---|
+| `mobile_scanner` | `^7.0.0` | QR code scanning for relay/identity pairing |
+| `app_links` | `^6.4.0` | Deep link handling |
+| `connectivity_plus` | `^7.0.0` | Network connectivity detection |
+| `url_launcher` | `^6.3.2` | Open external URLs |
+
+</Accordion>
+
+<Accordion title="UI and content rendering">
+
+| Package | Version | Purpose |
+|---|---|---|
+| `gpt_markdown` | `^1.1.6` | Render Markdown messages (including AI output) |
+| `highlight` | `^0.7.0` | Syntax highlighting in code blocks |
+| `lucide_icons_flutter` | `^3.1.0` | Icon set matching the desktop |
+| `scrollable_positioned_list` | `^0.3.8` | Efficient jump-to-message scrolling |
+
+</Accordion>
+
+<Accordion title="Shared assets">
+  The mobile app uses the same emoji dataset as the desktop. After bumping `@emoji-mart/data` on the desktop, regenerate the mobile asset:
+
+  ```bash
+  just mobile-emoji-data
+  ```
+
+  This runs `mobile/scripts/generate-emoji-data.mjs` and writes `mobile/assets/emoji/emoji-data.json`. Commit the generated file — it is not regenerated automatically at build time.
+</Accordion>
+
+## Architecture
+
+```
+lib/
+├── main.dart              # Entry point, Riverpod bootstrap
+├── app.dart               # MaterialApp with theme
+├── shared/
+│   └── theme/             # Catppuccin Latte (light) / Macchiato (dark),
+│                          # spacing tokens, typography extensions
+└── features/
+    └── home/              # Placeholder home surface
+```
+
+State is managed with Riverpod (`HookConsumerWidget` pattern throughout). The theme matches the desktop's Catppuccin Latte (light) and Catppuccin Macchiato (dark) palette, and uses the same `Grid` spacing tokens for consistent layout. Feature modules are isolated — no cross-feature imports are allowed except through `shared/`.

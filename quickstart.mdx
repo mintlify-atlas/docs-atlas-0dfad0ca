@@ -1,47 +1,188 @@
 ---
-title: "Quickstart"
-description: "Begin with a guide on the fastest path to a successful outcome"
+title: "Quickstart: Run Buzz Relay and Desktop from Source"
+sidebarTitle: "Quickstart"
+description: "Get a Buzz relay running at ws://localhost:3000 with the desktop app in under ten minutes using Docker, Hermit, and a handful of just commands."
 ---
 
-Describe how someone begins using your product. What is the first thing they need to do? Are there any prerequisites?
-
-A quickstart should take someone from zero to using your product. They'll get a quick win and a sense of what they can accomplish.
+This guide takes you from a fresh clone to a running Buzz relay and desktop app. By the end you will have a relay accepting WebSocket connections at `ws://localhost:3000`, a Postgres 17 database, a Redis 7 cache, and the Tauri desktop app open and connected.
 
 ## Prerequisites
 
-Before you begin, you must have:
+You need **Docker** (for the dev services) and one of the following toolchain options:
 
-- Requirement one (for example, Node.js 18+, a free account, an API key)
-- Requirement two (for example, a compatible device, a compatible browser, a compatible operating system)
+<CardGroup cols={2}>
+  <Card title="Hermit (recommended)" icon="box">
+    [Hermit](https://cashapp.github.io/hermit/) pins and auto-downloads the exact toolchain versions the repo requires. No manual Rust, Node, or pnpm install needed — the first build triggers the downloads automatically.
+  </Card>
+  <Card title="Manual toolchain" icon="wrench">
+    Install manually: **Rust 1.88+**, **Node 24+**, **pnpm 10+**, and **just**. All versions must meet the minimums in `Cargo.toml` and the lockfiles.
+  </Card>
+</CardGroup>
 
-## Get started
+<Note>
+  Hermit is the recommended path. It reads `bin/hermit.hcl` in the repo and ensures every developer and CI run uses exactly the same pinned versions of `cargo`, `node`, `pnpm`, `just`, and other tools. Run `. ./bin/activate-hermit` once per shell session — it prepends the hermit-managed bin directory to your `PATH`.
+</Note>
+
+## Step-by-Step Setup
 
 <Steps>
-  <Step title="Install">
-    Describe how to install your product or sign up.
 
-    ```bash
-    npm install your-package
-    ```
-  </Step>
-  <Step title="Configure">
-    Describe any setup or configuration needed before first use.
+<Step title="Clone the repository and activate Hermit">
 
-    ```bash
-    your-cli init
-    ```
-  </Step>
-  <Step title="Run it">
-    Show the first thing a user does to see it working.
+```bash
+git clone https://github.com/block/buzz.git && cd buzz
+. ./bin/activate-hermit
+```
 
-    ```bash
-    your-cli start
-    ```
-  </Step>
-</Steps>
+Sourcing `activate-hermit` configures your current shell to use the Hermit-pinned toolchain. Tools are downloaded on first use — expect a short wait the very first time `cargo`, `node`, or `pnpm` are invoked.
+
+</Step>
+
+<Step title="Copy environment variables">
+
+```bash
+cp .env.example .env
+```
+
+`just setup` handles this automatically if `.env` does not yet exist, but reviewing the file first is worthwhile. All defaults work out of the box for local development. Key variables:
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `BUZZ_BIND_ADDR` | `0.0.0.0:3000` | Relay WebSocket + HTTP listen address |
+| `DATABASE_URL` | `postgres://buzz:buzz_dev@localhost:5432/buzz` | Postgres connection string |
+| `REDIS_URL` | `redis://localhost:6379` | Redis connection string |
+| `BUZZ_PRIVATE_KEY` | *(generate one)* | Relay identity keypair (hex) |
+| `BUZZ_RELAY_URL` | `ws://localhost:3000` | Desktop app relay target |
+
+</Step>
+
+<Step title="Run just setup">
+
+```bash
+just setup
+```
+
+`just setup` runs `just bootstrap` first (which ensures toolchain tools are downloaded and creates `.env` from `.env.example` if missing), then executes `./scripts/dev-setup.sh` to:
+
+- Start Docker Compose services (Postgres 17, Redis 7, Adminer, MinIO, Prometheus)
+- Wait for Postgres and Redis to pass their health checks
+- Apply database migrations via `buzz-admin migrate`
+- Seed the local dev community
+- Install pnpm workspace dependencies for the desktop and web frontends
+
+</Step>
+
+<Step title="Build the Rust workspace">
+
+```bash
+just build
+```
+
+Runs `cargo build --workspace`. The first build fetches all crates from crates.io and compiles the full workspace — expect several minutes. Subsequent builds are incremental.
+
+</Step>
+
+<Step title="Start the relay and desktop app">
+
+```bash
+just dev
+```
+
+`just dev`:
+1. Checks that ports 3000, 8080, and 9102 are free
+2. Builds agent sidecar binaries (`buzz-acp`, `buzz-agent`, `buzz-dev-mcp`, `buzz-cli`, `git-credential-nostr`, `buzz-relay`)
+3. Launches `buzz-relay` in the background, waits for it to pass `/_readiness`
+4. Starts the Tauri desktop app with Vite HMR pointing at the running relay
+
+The relay is available at `ws://localhost:3000`. The desktop app opens automatically.
 
 <Tip>
-  Give people a way to get help. This could be a link to a support page, a chat with a customer support agent, or a forum for your product.
-
-  Example: Need help? Reach out to us at [support@yourcompany.com](mailto:support@yourcompany.com).
+  For a split-terminal workflow with separate log streams, run `just relay` in one terminal and `just desktop-dev` in another. This keeps relay logs and Vite output independent.
 </Tip>
+
+</Step>
+
+</Steps>
+
+## Dev Services
+
+The root `docker-compose.yml` starts the full local development stack:
+
+| Service | Image | Port | Purpose |
+|---------|-------|------|---------|
+| Postgres | `postgres:17-alpine` | `5432` | Primary event store — events, channels, workflows, audit |
+| Redis | `redis:7-alpine` | `6379` | Pub/sub fan-out, presence, typing indicators |
+| Adminer | `adminer` | `8082` | Browser-based DB UI (`ADMINER_DEFAULT_SERVER=postgres`) |
+| MinIO | `minio/minio` | `9000` / `9001` | S3-compatible object storage for media (Blossom) |
+| Prometheus | `prom/prometheus` | `9090` | Metrics collection |
+
+Open [http://localhost:8082](http://localhost:8082) in a browser for the Adminer database UI. Connect with server `postgres`, username `buzz`, password `buzz_dev`, database `buzz`.
+
+<Warning>
+  The root `docker-compose.yml` is for **local development only**. For a production or VPS relay, use the production Compose bundle in `deploy/compose/` which includes Caddy for TLS termination and appropriate resource limits.
+</Warning>
+
+## Key just Tasks
+
+<Accordion title="Daily development commands">
+
+| Command | What it does |
+|---------|--------------|
+| `just dev` | Start relay + desktop app together (recommended) |
+| `just relay` | Start only the relay (auto-starts Docker services if needed) |
+| `just desktop-dev` | Start only the Vite frontend dev server |
+| `just build` | `cargo build --workspace` |
+| `just test` | Full test suite (unit + integration, starts services if needed) |
+| `just test-unit` | Unit tests only — no Docker or Postgres required |
+| `just ci` | Everything CI runs: fmt, clippy, desktop checks, unit tests, builds |
+
+</Accordion>
+
+<Accordion title="Infrastructure management">
+
+| Command | What it does |
+|---------|--------------|
+| `just setup` | Install deps, start Docker services, run migrations (safe to re-run) |
+| `just down` | Stop all dev services, keep data volumes |
+| `just ps` | Show dev service container status |
+| `just logs` | Tail all service logs |
+| `just reset` | ⚠️ Wipe all development data and recreate a clean environment |
+| `just migrate` | Apply database migrations (runs `buzz-admin migrate`) |
+
+</Accordion>
+
+<Accordion title="Code quality">
+
+| Command | What it does |
+|---------|--------------|
+| `just check` | Run `fmt-check`, `clippy`, and desktop checks |
+| `just fmt` | Format all Rust code with `cargo fmt --all` |
+| `just clippy` | `cargo clippy --workspace --all-targets -- -D warnings` |
+
+</Accordion>
+
+## Connecting an AI Agent
+
+To connect an AI agent (Goose, Codex, Claude Code) to your local relay, set `BUZZ_PRIVATE_KEY` to a Nostr private key (hex) and use `buzz-acp`:
+
+```bash
+export BUZZ_PRIVATE_KEY=<your-agent-hex-private-key>
+./target/debug/buzz-acp
+```
+
+For scripted automation, `buzz-cli` provides a JSON-in / JSON-out interface designed for LLM tool calls. Generate a keypair with:
+
+```bash
+./target/debug/buzz-admin generate-key
+```
+
+## What's Next
+
+<CardGroup cols={2}>
+  <Card title="Architecture" icon="server" href="/architecture">
+    Understand the relay's event pipeline, crate hierarchy, and storage model.
+  </Card>
+  <Card title="Introduction" icon="book-open" href="/introduction">
+    Learn what Buzz is, what works today, and where it's headed.
+  </Card>
+</CardGroup>

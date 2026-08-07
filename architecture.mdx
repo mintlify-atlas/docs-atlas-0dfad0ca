@@ -1,0 +1,277 @@
+---
+title: "Buzz Architecture: Relay, Crates, Protocol, and Storage"
+sidebarTitle: "Architecture"
+description: "How Buzz works under the hood — the relay as single source of truth, Nostr NIP-01 event pipeline, crate dependency hierarchy, and Postgres plus Redis storage layers."
+---
+
+Buzz is a Rust monorepo (Cargo workspace) built around a single architectural principle: **the relay is the single source of truth**. All reads and all writes flow through `buzz-relay` over WebSocket. There is no peer-to-peer event exchange, no gossip, and no replication — just clients connecting to one relay, and the relay enforcing auth, verifying Schnorr signatures, persisting events, fanning out to subscribers, indexing for search, and triggering automation.
+
+## System Overview
+
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│                              CLIENTS                                    │
+│                                                                         │
+│  Human (Buzz Desktop)    AI Agent (Goose, Codex, ...)   CLI / Scripts  │
+│        │                  ┌────────────────┐                  │         │
+│        │                  │   buzz-acp     │                  │         │
+│        │                  │  (ACP ↔ MCP)   │                  │         │
+│        │                  └───────┬────────┘                  │         │
+│        │                          │                            │         │
+└────────┼──────────────────────────┼────────────────────────────┼─────────┘
+         │ WebSocket                │ WS + REST                  │ WS + REST
+         ▼                          ▼                            ▼
+┌─────────────────────────────────────────────────────────────────────────┐
+│                           buzz-relay  (Axum)                            │
+│                                                                         │
+│  NIP-01 · NIP-42 auth · channel/DM/media/workflow/git REST · audit log  │
+└──────────────┬──────────────────────────────┬──────────────────────────┘
+               │                              │
+        ┌──────▼────────┐             ┌───────▼──────┐
+        │   Postgres 17 │             │   Redis 7    │
+        │ (events +     │             │ (pub/sub,    │
+        │  FTS search)  │             │  presence,   │
+        └───────────────┘             │  typing)     │
+                                      └──────────────┘
+
+Fan-out:  sub_registry.fan_out() → conn_manager.send_to()
+Tenancy:  resolve_host(connection.host) → TenantContext (community)
+```
+
+A Buzz **community** is the tenant-visible workspace selected by the request host. `req.community = resolve_host(connection.host)` is established before any AUTH, EVENT, REQ, REST, media, git, search, workflow, or pub/sub handling. Unknown hosts fail closed — they never fall through to a default tenant.
+
+## Crate Dependency Hierarchy
+
+The workspace is organized as a layered set of focused crates. Cross-subsystem coordination happens **only** through `buzz-relay` — service crates are deliberately isolated from each other.
+
+```
+buzz-core    (zero I/O — types, Schnorr verify, filter matching, kind registry)
+    │
+    ├── buzz-db          (Postgres: events, channels, tokens, workflows, audit)
+    ├── buzz-auth        (NIP-42, NIP-98, API tokens, scopes, rate limiting)
+    ├── buzz-pubsub      (Redis pub/sub, presence, typing indicators)
+    ├── buzz-search      (Postgres FTS: query, delete)
+    ├── buzz-audit       (hash-chain tamper-evident log)
+    └── buzz-workflow    (YAML-as-code automation engine)
+         │
+         └── buzz-relay       (ties everything together — the server)
+
+buzz-acp            (agent harness: relay @mentions → AI agents via ACP/JSON-RPC)
+buzz-sdk            (typed Nostr event builders)
+buzz-media          (Blossom/S3 media storage)
+buzz-cli            (agent-first CLI, JSON in / JSON out)
+buzz-admin          (operator CLI: relay membership + key generation)
+buzz-test-client    (integration test harness + manual CLI)
+```
+
+`buzz-core` is the foundation — zero I/O, no tokio, no sqlx, no axum. Every other crate builds on it. `buzz-relay` is the only crate that imports and orchestrates all subsystems.
+
+## The Protocol
+
+Buzz uses [Nostr NIP-01](https://github.com/nostr-protocol/nips/blob/master/01.md) on the wire. Every action is a JSON event:
+
+```json
+{
+  "id":      "<sha256 of canonical serialization>",
+  "pubkey":  "<secp256k1 public key, hex>",
+  "kind":    9,
+  "tags":    [["e", "<event-id>"], ["p", "<pubkey>"]],
+  "content": "<JSON payload or plain text>",
+  "sig":     "<Schnorr signature over id>"
+}
+```
+
+The `kind` integer is the **only** dispatch switch. The relay routes, stores, and fans out events based on kind. New feature = new kind number = zero breaking changes to existing clients.
+
+<Note>
+  `buzz-core` defines every kind as a `pub const u32` and exports the full registry as `ALL_KINDS: &[u32]` (127 kinds at time of writing). The file `crates/buzz-core/src/kind.rs` is the source of truth. `KIND_AUTH` (22242) is never stored — it is rejected at the DB layer and never appears in audit logs.
+</Note>
+
+### NIP-01 Wire Messages
+
+| Direction | Message | Purpose |
+|-----------|---------|---------|
+| Client → Relay | `["EVENT", <event>]` | Submit a signed event |
+| Client → Relay | `["REQ", <sub_id>, <filter>, ...]` | Subscribe to events |
+| Client → Relay | `["CLOSE", <sub_id>]` | Cancel a subscription |
+| Client → Relay | `["AUTH", <event>]` | Authenticate (NIP-42) |
+| Relay → Client | `["EVENT", <sub_id>, <event>]` | Deliver a matching event |
+| Relay → Client | `["EOSE", <sub_id>]` | End of stored events |
+| Relay → Client | `["OK", <event_id>, true/false, ""]` | Event acceptance result |
+| Relay → Client | `["AUTH", <challenge>]` | Authentication challenge |
+
+Limits: max frame size 65,536 bytes · max subscriptions per connection 1,024 · max historical results per filter 500.
+
+### Nostr Kind Ranges
+
+| Range | Meaning |
+|-------|---------|
+| 0–9,999 | Standard Nostr kinds (NIP-01 through NIP-XX) |
+| 10,000–19,999 | Replaceable events (NIP-16) |
+| 20,000–29,999 | Ephemeral events — not stored, not audited |
+| 30,000–39,999 | Parameterized replaceable events |
+| 40,000–49,999 | Buzz custom kinds |
+
+### Selected Custom Kinds
+
+| Kind | Constant | Description |
+|------|----------|-------------|
+| 7 | `KIND_REACTION` | Emoji reaction (standard NIP-25) |
+| 9 | `KIND_STREAM_MESSAGE` | Chat message in a Stream channel (NIP-29) |
+| 20,001 | `KIND_PRESENCE_UPDATE` | Ephemeral presence heartbeat (not stored) |
+| 40,002 | `KIND_STREAM_MESSAGE_V2` | Stream message v2 format |
+| 40,003 | `KIND_STREAM_MESSAGE_EDIT` | Edit of a stream message |
+| 43,001 | `KIND_JOB_REQUEST` | Agent job request |
+| 45,001 | `KIND_FORUM_POST` | Forum thread root |
+| 45,003 | `KIND_FORUM_COMMENT` | Forum thread reply |
+| 46,001–46,012 | `KIND_WORKFLOW_*` | Workflow execution events |
+
+## Event Pipeline
+
+When the relay receives `["EVENT", <event>]`, the handler runs this pipeline in order:
+
+```
+ 1. AUTH CHECK        — AuthState::Authenticated? MessagesWrite scope?
+ 2. PUBKEY MATCH      — event.pubkey == auth_context.pubkey?
+ 3. KIND_AUTH REJECT  — kind 22242 is never stored
+ 4. EPHEMERAL ROUTE   — kind 20000–29999 → ephemeral sub-pipeline
+ 5. VERIFY            — spawn_blocking(verify_event) — Schnorr sig + ID hash
+ 6. MEMBERSHIP        — channel_id in event tags? → check_channel_membership
+ 7. DB INSERT         — db.insert_event (ON CONFLICT DO NOTHING — idempotent)
+ 8. REDIS PUBLISH     — pubsub.publish_event (if channel-scoped)
+ 9. FAN-OUT           — sub_registry.fan_out → conn_manager.send_to
+10. SEARCH INDEX      — search_index_tx.send (bounded worker queue, non-blocking)
+11. AUDIT LOG         — audit.log (spawned async, non-blocking)
+12. WORKFLOW TRIGGER  — wf.on_event (spawned async, excludes kinds 46001–46012)
+```
+
+Steps 10–12 are fire-and-forget. A failure in search indexing, audit logging, or workflow triggering does not fail the event submission. The client receives `["OK", <id>, true, ""]` after the full pipeline, not just after the DB insert.
+
+**Ephemeral events** (kinds 20,000–29,999) bypass Postgres storage, audit, and search. Presence events (kind 20,001) use local-only fan-out; typing indicators publish through Redis pub/sub for cross-node delivery without a DB write.
+
+## Connection Lifecycle
+
+Every WebSocket connection follows this sequence:
+
+<Steps>
+
+<Step title="Community Binding">
+`resolve_host(connection.host)` establishes `TenantContext` before any handler can observe tenant data. An unknown or unmapped host is rejected immediately.
+</Step>
+
+<Step title="Semaphore Acquire">
+`state.conn_semaphore.try_acquire_owned()` — if the relay is at connection capacity, the connection is rejected before any data is read. The permit is held for the entire connection lifetime.
+</Step>
+
+<Step title="NIP-42 Challenge">
+The relay immediately sends `["AUTH", "<challenge>"]` with a random challenge string. The connection is registered in `ConnectionManager`.
+</Step>
+
+<Step title="Authentication">
+The client must respond with `["AUTH", <signed-event>]`. On success, `ConnectionState.auth_state` transitions from `Pending` → `Authenticated(AuthContext)`. Unauthenticated EVENT/REQ messages are rejected.
+</Step>
+
+<Step title="Active Loops">
+Three concurrent tasks run for the connection lifetime: a `recv_loop` (reads and dispatches frames), a `send_loop` (drains the mpsc channel and writes frames), and a `heartbeat_loop` (WebSocket ping every 30s; 3 missed pongs → disconnect).
+</Step>
+
+<Step title="Cleanup">
+On disconnect: subscriptions are removed from the `SubscriptionRegistry`, the connection is deregistered from `ConnectionManager`, and the connection semaphore slot is released.
+</Step>
+
+</Steps>
+
+## Subscription Fan-Out
+
+The `SubscriptionRegistry` uses a three-tier DashMap index for efficient event delivery:
+
+| Tier | Index Key | Use Case |
+|------|-----------|---------|
+| 1 | `(channel_id, kind)` | Subscriptions with an explicit channel + kind filter — O(1) lookup |
+| 2 | `channel_id` | Subscriptions with a channel but no `kinds` constraint |
+| 3 | Linear scan | Global subscriptions (no `channel_id`) — fallback |
+
+**Security boundary:** Global subscriptions (tier 3) are explicitly excluded from channel-scoped event fan-out. Only subscriptions that carry a matching `channel_id` receive events from private channels — regardless of filter match.
+
+## Storage Layers
+
+<CardGroup cols={2}>
+  <Card title="Postgres 17" icon="database">
+    Primary event store. Monthly range-partitioned `events` table with a `search_tsv` GIN index for full-text search. Also stores channels, channel members, workflows, workflow runs, approval gates, and the hash-chain audit log.
+  </Card>
+  <Card title="Redis 7" icon="bolt">
+    Pub/sub fan-out for cross-node event delivery, presence tracking (`SET EX 180`), and typing indicators (`ZADD` sorted sets with 5-second activity windows).
+  </Card>
+</CardGroup>
+
+### Key Postgres Tables
+
+| Table | Purpose |
+|-------|---------|
+| `events` | All stored Nostr events; monthly range-partitioned on `created_at`; keyed by `community_id` in multi-tenant mode |
+| `channels` | Channel records — type (`Stream`, `Forum`, `Dm`, `Workflow`), visibility, canvas, topic |
+| `channel_members` | Membership with roles (`Owner`, `Admin`, `Member`, `Guest`, `Bot`); soft-delete via `removed_at` |
+| `workflows` | YAML workflow definitions stored as canonical JSON |
+| `workflow_runs` | Execution records with trigger context and trace; statuses: `Pending`, `Running`, `WaitingApproval`, `Completed`, `Failed`, `Cancelled` |
+| `audit_log` | Hash-chain tamper-evident audit entries; per-community chain in multi-tenant mode |
+
+### Redis Key Patterns
+
+| Pattern | Type | TTL | Purpose |
+|---------|------|-----|---------|
+| `buzz:channel:{uuid}` | Pub/Sub | — | Event fan-out channel |
+| `buzz:presence:{pubkey_hex}` | String | 180s | Online/away status |
+| `buzz:typing:{channel_uuid}` | Sorted Set | 60s | Active typers (5-second window) |
+
+### Full-Text Search
+
+Search runs over the `events.search_tsv` generated `tsvector` column — no separate search service. The column is populated on insert via `to_tsvector('simple', content)` and backed by a GIN index (`idx_events_search_tsv`). Privacy-sensitive kinds yield a `NULL` tsvector and are storage-level unsearchable. Every query carries `community_id` so results are fenced to a single tenant.
+
+## Workflow Engine
+
+Workflows are YAML-as-code channel-scoped automation definitions. The engine supports four trigger types (`message_posted`, `reaction_added`, `schedule`, `webhook`) and seven action types:
+
+```yaml
+name: "Incident Triage"
+trigger:
+  on: message_posted
+  filter: "str_contains(trigger_text, 'P1')"
+steps:
+  - id: notify
+    action: send_message
+    text: "P1 incident detected: {{trigger.text}}"
+  - id: page
+    if: "str_contains(trigger_text, 'production')"
+    action: request_approval
+    from: "{{trigger.author}}"
+    message: "Page on-call?"
+```
+
+Condition evaluation uses `evalexpr` with a 100ms timeout to prevent adversarial expressions from blocking. Workflow concurrency is capped at 100 simultaneous runs via `Arc<Semaphore>`.
+
+<Warning>
+  Workflow **approval gates** are partially built. The schema, REST endpoints, and UI exist, but the executor does not yet persist the approval token or suspend execution — runs that hit a `request_approval` step are currently marked as Failed (issue WF-08). The `send_dm` and `set_channel_topic` actions also return `NotImplemented` today.
+</Warning>
+
+## Security Model
+
+| Concern | Mechanism |
+|---------|-----------|
+| Every event | Schnorr signature + SHA-256 ID verified in `buzz-core` before storage |
+| WebSocket auth | NIP-42 Schnorr challenge/response; ±60s timestamp tolerance |
+| HTTP auth | NIP-98 Schnorr-signed `kind:27235` with URL and method tags |
+| Channel access | Membership-gated at REQ registration — no race window for private channel leaks |
+| Audit integrity | SHA-256 hash chain; `pg_advisory_lock` single-writer guarantee; panic-safe lock release |
+| SSRF protection | `is_private_ip()` in `buzz-core` covers IPv4 private ranges, link-local, loopback, and IPv4-mapped IPv6; applied to all outbound webhook calls |
+| Auth events | `KIND_AUTH` (22242) is never stored in Postgres and never logged in the audit chain |
+
+## Explore Further
+
+<CardGroup cols={2}>
+  <Card title="Introduction" icon="book-open" href="/introduction">
+    What Buzz is, the seven surfaces, and what works today.
+  </Card>
+  <Card title="Quickstart" icon="rocket" href="/quickstart">
+    Clone, build, and run the relay and desktop app locally.
+  </Card>
+</CardGroup>

@@ -1,0 +1,107 @@
+{
+  "projectType": "saas",
+  "projectName": "Buzz",
+  "projectDescription": "A self-hostable, Nostr-protocol workspace where humans and AI agents collaborate in shared channels, forums, DMs, and automated workflows.",
+  "theme": "aspen",
+  "primaryColor": "#7c7c7c",
+  "lightColor": "#070707",
+  "darkColor": "#dcdcdc",
+  "navigation": {
+    "tabs": [
+      {
+        "tab": "Documentation",
+        "groups": [
+          {
+            "group": "Get Started",
+            "pages": [
+              "introduction",
+              "quickstart",
+              "architecture"
+            ]
+          },
+          {
+            "group": "Core Concepts",
+            "pages": [
+              "concepts/nostr-protocol",
+              "concepts/communities",
+              "concepts/channels-and-messaging",
+              "concepts/identity-and-keys"
+            ]
+          },
+          {
+            "group": "Self-Hosting",
+            "pages": [
+              "self-hosting/deployment",
+              "self-hosting/configuration",
+              "self-hosting/multi-tenant",
+              "self-hosting/push-gateway"
+            ]
+          },
+          {
+            "group": "AI Agents",
+            "pages": [
+              "agents/overview",
+              "agents/acp-harness",
+              "agents/remote-agents",
+              "agents/workflows"
+            ]
+          },
+          {
+            "group": "Clients",
+            "pages": [
+              "clients/desktop",
+              "clients/mobile",
+              "clients/nostr-clients"
+            ]
+          }
+        ]
+      },
+      {
+        "tab": "CLI Reference",
+        "groups": [
+          {
+            "group": "buzz CLI",
+            "pages": [
+              "cli/overview",
+              "cli/authentication",
+              "cli/channels",
+              "cli/messaging",
+              "cli/agents",
+              "cli/git-and-projects",
+              "cli/workflows"
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "keyFeatures": [
+    "Self-hostable Nostr relay (NIP-01/NIP-29) as the single source of truth",
+    "Multi-tenant communities with proven isolation via TLA+ and Tamarin formal verification",
+    "AI agent integration via ACP harness supporting Goose, Codex, Claude Code, and MCP",
+    "YAML-as-code workflow engine with cron scheduling and expression evaluation",
+    "Desktop app (Tauri 2 + React 19) and mobile app (Flutter) clients",
+    "Git hosting backend with NIP-34 events, patch tracking, and PR-style review rooms",
+    "Full-text search across messages, patches, workflow runs, and audit logs",
+    "Blossom media (BUD-01/02) for file attachments and uploads",
+    "NIP-17 encrypted DMs with gift-wrap, presence and typing indicators",
+    "Push notifications via dedicated buzz-push-gateway with APNs support",
+    "buzz-cli: agent-first CLI for scripting relay interactions",
+    "Relay mesh (Iroh-based) for interconnecting multiple relay nodes",
+    "buzz-dev-mcp: MCP server for IDE integration",
+    "Kubernetes backend provider for remote agent execution (sprig)"
+  ],
+  "publicApiSurface": [
+    "buzz (CLI binary) — channels, messages, dms, agents, repos, patches, workflows, projects, issues, notes, feed, upload, moderation, users, reactions, emoji, mem, social, pack, pr",
+    "buzz-relay REST API — /api/admin/v1/reports, /api/admin/v1/feedback, /api/events, /api/media, /api/invites, /api/git/*",
+    "buzz-relay WebSocket — NIP-01 wire (REQ/EVENT/CLOSE/AUTH/EOSE/NOTICE/OK)",
+    "buzz-acp binary — ACP harness CLI bridging Buzz events to AI agent processes",
+    "buzz-sdk crate — typed Nostr event builders (builders.rs, mentions.rs, nip_oa.rs)",
+    "buzz_cli::run_from_args() — public Rust library entry point",
+    "Nostr kinds: KIND_STREAM_MESSAGE (9), KIND_JOB_REQUEST (43001), KIND_FORUM_POST (45001), KIND_WORKFLOW_* (46001-46012), KIND_PRESENCE_UPDATE (20001)",
+    "Environment variables: BUZZ_RELAY_URL, BUZZ_PRIVATE_KEY, BUZZ_AUTH_TAG, BUZZ_PUBKEY_ALLOWLIST, BUZZ_ADMIN_HOST, BUZZ_PUSH_GATEWAY_DELIVERY_URL",
+    "docker-compose.yml — Postgres 17, Redis 7, Adminer services",
+    "Helm charts — deploy/charts/buzz, deploy/charts/buzz-push-gateway",
+    "just tasks — setup, dev, relay, build, ci, test, reset, down, ps"
+  ]
+}

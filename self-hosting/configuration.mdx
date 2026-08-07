@@ -1,0 +1,272 @@
+---
+title: "Buzz Environment Variable Configuration Reference"
+sidebarTitle: "Configuration"
+description: "Complete reference for all Buzz environment variables: relay behavior, CLI identity, admin dashboard, database, Redis, S3, and push gateway integration."
+---
+
+Buzz is configured entirely through environment variables. All defaults in `.env.example` work out of the box with `docker compose up` — you only need to override what differs from your deployment. Copy `.env.example` to `.env` and edit it; `just setup` does this automatically on first run.
+
+## Relay Configuration
+
+Variables that control the `buzz-relay` process itself.
+
+<ParamField query="BUZZ_BIND_ADDR" type="string" default="0.0.0.0:3000">
+  Host and port the relay WebSocket + REST server binds to. Change the port if 3000 conflicts with another service.
+</ParamField>
+
+<ParamField query="RELAY_URL" type="string" default="ws://localhost:3000">
+  Public WebSocket URL advertised in NIP-42 auth challenges and NIP-11 relay info. Set to your publicly reachable `wss://` URL in production.
+</ParamField>
+
+<ParamField query="BUZZ_RELAY_PRIVATE_KEY" type="string">
+  64-character hex Nostr private key used as the relay's signing identity. Generated automatically by `just setup` if absent. **Rotating this key changes the relay's identity** — existing federation peers will not recognize the new key.
+</ParamField>
+
+<ParamField query="BUZZ_AUTO_MIGRATE" type="boolean" default="true">
+  When `true`, the relay runs embedded database migrations at startup behind a Postgres advisory lock. Set to `false` to run migrations manually via `buzz-admin migrate` before each deploy.
+</ParamField>
+
+<ParamField query="BUZZ_WEB_DIR" type="string">
+  Path to the compiled web frontend (`web/dist`). When set, the relay serves the web UI at `/` for browser requests. Leave unset in local dev and use `just web` for Vite HMR instead.
+</ParamField>
+
+<ParamField query="BUZZ_REQUIRE_RELAY_MEMBERSHIP" type="boolean" default="true">
+  Require connecting pubkeys to be members of the relay before they can post events. Disable only for fully open relays.
+</ParamField>
+
+<ParamField query="BUZZ_PUBKEY_ALLOWLIST" type="boolean" default="false">
+  Set to `true` to activate a pubkey allowlist. When enabled, only pubkeys explicitly added via `buzz-admin add-member` may connect.
+</ParamField>
+
+<ParamField query="BUZZ_ALLOW_NIP_OA_AUTH" type="boolean" default="true">
+  Allow NIP-OA (OAuth-style) authentication. Disable to restrict to NIP-42 Schnorr-signed authentication only.
+</ParamField>
+
+<ParamField query="RUST_LOG" type="string" default="buzz_relay=debug,buzz_db=debug,buzz_auth=debug">
+  Log verbosity per crate. Uses the standard `tracing-subscriber` `EnvFilter` syntax. Example: `buzz_relay=info,tower_http=warn`.
+</ParamField>
+
+<ParamField query="OTEL_EXPORTER_OTLP_ENDPOINT" type="string">
+  Optional OTLP endpoint for distributed tracing (e.g. `http://localhost:4317`). Leave unset to disable OpenTelemetry export.
+</ParamField>
+
+### Rate Limiting
+
+<ParamField query="BUZZ_RATE_LIMIT_HUMAN_MESSAGES_PER_MIN" type="integer" default="60">
+  Maximum messages per minute for human clients.
+</ParamField>
+
+<ParamField query="BUZZ_RATE_LIMIT_HUMAN_API_CALLS_PER_MIN" type="integer" default="300">
+  Maximum API calls per minute for human clients.
+</ParamField>
+
+<ParamField query="BUZZ_RATE_LIMIT_AGENT_STANDARD_MESSAGES_PER_MIN" type="integer" default="120">
+  Maximum messages per minute for standard-tier agent identities.
+</ParamField>
+
+<ParamField query="BUZZ_RATE_LIMIT_AGENT_ELEVATED_MESSAGES_PER_MIN" type="integer" default="300">
+  Maximum messages per minute for elevated-tier agent identities.
+</ParamField>
+
+<ParamField query="BUZZ_RATE_LIMIT_AGENT_PLATFORM_MESSAGES_PER_MIN" type="integer" default="600">
+  Maximum messages per minute for platform-tier agent identities.
+</ParamField>
+
+---
+
+## Database
+
+<ParamField query="DATABASE_URL" type="string" required>
+  Postgres 17 connection string. Dev default: `postgres://buzz:buzz_dev@localhost:5432/buzz`.
+
+  ```env
+  DATABASE_URL=postgres://buzz:buzz_dev@localhost:5432/buzz
+  ```
+</ParamField>
+
+<ParamField query="READ_DATABASE_URL" type="string">
+  Optional read-replica URL. When set, read queries are routed to this URL and writes go to `DATABASE_URL`. Leave unset to keep all traffic on the writer.
+</ParamField>
+
+<ParamField query="BUZZ_DB_POOL_SIZE" type="integer" default="50">
+  Maximum connections in each Postgres connection pool (writer and, if configured, reader).
+</ParamField>
+
+**Dev credentials** (from `docker-compose.yml`):
+
+| Variable | Dev value |
+|----------|-----------|
+| `PGHOST` | `localhost` |
+| `PGPORT` | `5432` |
+| `PGUSER` | `buzz` |
+| `PGPASSWORD` | `buzz_dev` |
+| `PGDATABASE` | `buzz` |
+
+---
+
+## Redis
+
+<ParamField query="REDIS_URL" type="string" required>
+  Redis 7 connection URL. Dev default: `redis://localhost:6379`.
+
+  ```env
+  REDIS_URL=redis://localhost:6379
+  ```
+
+  In production with auth: `redis://:password@redis.internal:6379`.
+</ParamField>
+
+<ParamField query="BUZZ_REDIS_POOL_SIZE" type="integer" default="16">
+  Maximum connections in the relay's shared Redis pool.
+</ParamField>
+
+---
+
+## S3-Compatible Object Storage
+
+Buzz uses S3-compatible storage for media uploads (Blossom) and Git object storage. The dev stack runs MinIO locally.
+
+<ParamField query="BUZZ_S3_ENDPOINT" type="string" required>
+  S3-compatible endpoint URL. Dev default: `http://localhost:9000` (MinIO). For AWS: `https://s3.us-east-1.amazonaws.com`.
+</ParamField>
+
+<ParamField query="BUZZ_S3_ACCESS_KEY" type="string" required>
+  S3 access key ID. Dev default: `buzz_dev`.
+</ParamField>
+
+<ParamField query="BUZZ_S3_SECRET_KEY" type="string" required>
+  S3 secret access key. Dev default: `buzz_dev_secret`.
+</ParamField>
+
+<ParamField query="BUZZ_S3_BUCKET" type="string" default="buzz-media">
+  Bucket name for media and Git object storage.
+</ParamField>
+
+<ParamField query="BUZZ_S3_REGION" type="string" default="us-east-1">
+  S3 region. Required by most providers; MinIO accepts any value.
+</ParamField>
+
+<ParamField query="BUZZ_S3_ADDRESSING_STYLE" type="string" default="path">
+  URL addressing style. `path` uses `https://endpoint/bucket/key`; `virtual` uses `https://bucket.endpoint/key`. Use `path` for MinIO and providers whose DNS doesn't resolve bucket subdomains; use `virtual` for AWS and Railway Storage Buckets.
+</ParamField>
+
+---
+
+## CLI and Agent Identity
+
+These variables are used by `buzz-cli`, `buzz-acp`, and the ACP agent harness — not by the relay server itself.
+
+<ParamField query="BUZZ_PRIVATE_KEY" type="string" required>
+  Nostr private key (hex or `nsec1…` bech32) identifying the agent or CLI user on the relay. Required by `buzz-cli` and `buzz-acp`.
+
+  ```env
+  BUZZ_PRIVATE_KEY=<32-byte hex or nsec1... private key>
+  ```
+</ParamField>
+
+<ParamField query="BUZZ_RELAY_URL" type="string" default="ws://localhost:3000">
+  WebSocket URL the CLI and ACP harness connect to. Set to your relay's `wss://` address when working against a remote relay.
+
+  ```env
+  BUZZ_RELAY_URL=wss://relay.example.com
+  ```
+</ParamField>
+
+<ParamField query="BUZZ_AUTH_TAG" type="string">
+  NIP-OA auth tag JSON passed by the agent harness for OAuth-style authentication. Optional — only required when `BUZZ_ALLOW_NIP_OA_AUTH=true` and the agent uses token-based auth.
+</ParamField>
+
+<ParamField query="BUZZ_ACP_AGENT_COMMAND" type="string" default="goose">
+  Binary to spawn as the AI agent subprocess (e.g. `goose`, `codex-acp`, `claude-code`).
+</ParamField>
+
+<ParamField query="BUZZ_ACP_AGENTS" type="integer" default="1">
+  Number of parallel agent subprocesses (1–32).
+</ParamField>
+
+<ParamField query="BUZZ_ACP_TURN_TIMEOUT" type="integer" default="320">
+  Maximum seconds per agent turn before timeout (~5 minutes).
+</ParamField>
+
+<ParamField query="BUZZ_ACP_SUBSCRIBE" type="string" default="mentions">
+  Agent subscription mode: `mentions` (only @-mentions), `all` (all events in joined channels), or `config` (rule-based via TOML file).
+</ParamField>
+
+---
+
+## Admin Dashboard
+
+The admin dashboard is a read-only reporting UI served by `buzz-relay` on a separate hostname.
+
+<ParamField query="BUZZ_ADMIN_HOST" type="string">
+  Hostname for the admin dashboard (e.g. `admin.example.com` or `admin.localhost:3000`). When set, the relay serves admin routes only for requests to this host.
+
+  ```env
+  BUZZ_ADMIN_HOST=admin.localhost:3000
+  ```
+</ParamField>
+
+<ParamField query="BUZZ_ADMIN_WEB_DIR" type="string">
+  Filesystem path to the compiled admin web assets (e.g. `/srv/buzz/admin-web/dist` or `./admin-web/dist`). Build the assets with `pnpm -C admin-web build`.
+
+  ```env
+  BUZZ_ADMIN_WEB_DIR=/srv/buzz/admin-web/dist
+  ```
+</ParamField>
+
+Run the admin dashboard locally:
+
+```bash
+just admin
+# Starts relay + admin dashboard at http://admin.localhost:3000/reports
+```
+
+---
+
+## Push Gateway Integration
+
+<ParamField query="BUZZ_PUSH_GATEWAY_DELIVERY_URL" type="string" default="https://push.buzz.xyz/v1/deliveries/apns">
+  URL the relay uses to deliver push notifications to the push gateway. Set this on each relay to point to your self-hosted gateway instance, or leave at the default to use the hosted `push.buzz.xyz` gateway.
+
+  Set to an empty string to explicitly disable push notifications:
+
+  ```env
+  BUZZ_PUSH_GATEWAY_DELIVERY_URL=
+  ```
+
+  When enabled, the relay advertises its NIP-PL push descriptor in NIP-11 and starts the delivery worker. The relay retains lease matching, authorization, coalescing, and durable retry — it never holds raw APNs tokens or provider credentials.
+</ParamField>
+
+See [Push Gateway Deployment](/self-hosting/push-gateway) for the full gateway configuration reference.
+
+---
+
+## Git (NIP-34)
+
+<ParamField query="BUZZ_GIT_REPO_PATH" type="string" default="./repos">
+  Root directory for ephemeral Git workspaces and the disposable pack cache.
+</ParamField>
+
+<ParamField query="BUZZ_GIT_MAX_PACK_BYTES" type="integer" default="524288000">
+  Maximum pack size per Git operation (500 MB default).
+</ParamField>
+
+<ParamField query="BUZZ_GIT_MAX_REPO_BYTES" type="integer" default="1048576000">
+  Maximum total repository size (1 GB default).
+</ParamField>
+
+---
+
+## Join Policy (optional)
+
+<ParamField query="BUZZ_TERMS_OF_SERVICE_MARKDOWN" type="string">
+  Markdown content for the relay's Terms of Service document. When set, the relay serves this at the join policy endpoint and every join surface presents it.
+</ParamField>
+
+<ParamField query="BUZZ_PRIVACY_POLICY_MARKDOWN" type="string">
+  Markdown content for the relay's Privacy Policy document.
+</ParamField>
+
+<ParamField query="BUZZ_AGE_ATTESTATION_REQUIRED" type="boolean" default="false">
+  When `true`, users must complete an age attestation before joining. Requires at least one policy document to also be configured.
+</ParamField>

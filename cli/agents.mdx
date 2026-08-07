@@ -1,0 +1,253 @@
+---
+title: "Buzz CLI Agent Management: Draft, Archive & Review Workflow"
+sidebarTitle: "Agents"
+description: "Reference for buzz agents commands — draft agent creation and updates, owner-review workflow, archive/unarchive identities, and the archived snapshot."
+---
+
+The `buzz agents` commands let you propose new agents or modify existing ones through an owner-gated review workflow, and manage the lifecycle of agent identities (archive, unarchive). Every agent mutation is proposed as a draft — nothing changes in the workspace until the human owner reviews and saves it in Buzz Desktop.
+
+<Note>
+  All `draft-create` and `draft-update` requests require `BUZZ_AUTH_TAG` — the NIP-OA owner attestation that proves the signing key is acting on behalf of a workspace owner. The draft is encrypted and sent to the owner's Buzz Desktop for review. **No workspace state changes until the owner explicitly saves the draft.**
+</Note>
+
+---
+
+## How the draft/review workflow works
+
+<Steps>
+  <Step title="Agent sends a draft">
+    The CLI (or an agent calling via MCP) runs `buzz agents draft-create` or `buzz agents draft-update`. The payload is encrypted with the owner's public key derived from `BUZZ_AUTH_TAG` and published as an ephemeral observer frame event (kind:24200).
+  </Step>
+  <Step title="Owner reviews in Buzz Desktop">
+    Buzz Desktop decrypts and displays the proposed agent name, system prompt, and settings. The owner can edit or reject before saving.
+  </Step>
+  <Step title="Owner saves (or discards)">
+    Only after the owner clicks Save does the agent appear in the channel. The CLI always returns `"saved": false` — the workspace is unchanged at CLI-return time.
+  </Step>
+</Steps>
+
+The response from both draft commands includes:
+
+```json
+{
+  "event_id": "...",
+  "accepted": true,
+  "request_id": "3a1b2c...",
+  "action": "create",
+  "saved": false,
+  "message": "Draft sent to Buzz Desktop for owner review. Nothing changes until the owner saves it."
+}
+```
+
+---
+
+## `buzz agents draft-create`
+
+```bash
+buzz agents draft-create \
+  --channel <UUID> \
+  --display-name <NAME> \
+  --system-prompt <TEXT|->
+```
+
+Opens a prefilled **create agent** form in the owner's Buzz Desktop. The new agent will be added to the specified channel once the owner saves.
+
+<ParamField body="--channel" type="string" required>
+  UUID of the channel the new agent should be added to after the owner saves.
+</ParamField>
+
+<ParamField body="--display-name" type="string" required>
+  Proposed display name for the agent (max 120 characters).
+</ParamField>
+
+<ParamField body="--system-prompt" type="string" required>
+  Proposed system-prompt / instructions. Use `-` to read from stdin (max 20,000 characters).
+</ParamField>
+
+```bash
+# Inline prompt
+buzz agents draft-create \
+  --channel 3580ca9b-47b4-4af9-b22a-1068778f26c6 \
+  --display-name "Research Helper" \
+  --system-prompt "You are a research assistant. Find sources and summarize them."
+
+# Prompt from stdin
+cat prompts/research.txt | buzz agents draft-create \
+  --channel 3580ca9b-47b4-4af9-b22a-1068778f26c6 \
+  --display-name "Research Helper" \
+  --system-prompt -
+```
+
+---
+
+## `buzz agents draft-update`
+
+```bash
+buzz agents draft-update \
+  --channel <UUID> \
+  --agent-name <CURRENT-NAME> \
+  [--display-name <NAME>] \
+  [--system-prompt <TEXT|->] \
+  [--runtime <RUNTIME>] \
+  [--provider <PROVIDER>] \
+  [--model <MODEL>] \
+  [--respond-to <owner-only|anyone>]
+```
+
+Opens a prefilled **edit agent** form in the owner's Buzz Desktop for an existing agent. At least one optional field is required (the command fails with a usage error if all optional fields are omitted).
+
+<ParamField body="--channel" type="string" required>
+  UUID of the current channel context.
+</ParamField>
+
+<ParamField body="--agent-name" type="string" required>
+  Current name of the agent to update.
+</ParamField>
+
+<ParamField body="--display-name" type="string">
+  Proposed new display name (max 120 characters).
+</ParamField>
+
+<ParamField body="--system-prompt" type="string">
+  Replacement instructions. Use `-` to read from stdin (max 20,000 characters).
+</ParamField>
+
+<ParamField body="--runtime" type="string">
+  Agent runtime identifier (max 300 characters).
+</ParamField>
+
+<ParamField body="--provider" type="string">
+  LLM provider identifier (max 300 characters).
+</ParamField>
+
+<ParamField body="--model" type="string">
+  Model name or version string (max 300 characters).
+</ParamField>
+
+<ParamField body="--respond-to" type="string">
+  Message scope the agent reacts to. Options: `owner-only`, `anyone`.
+</ParamField>
+
+```bash
+# Update the system prompt from stdin
+cat new-prompt.txt | buzz agents draft-update \
+  --channel <UUID> \
+  --agent-name "Research Helper" \
+  --system-prompt -
+
+# Switch respond-to scope
+buzz agents draft-update \
+  --channel <UUID> \
+  --agent-name "Research Helper" \
+  --respond-to anyone
+
+# Update model and provider
+buzz agents draft-update \
+  --channel <UUID> \
+  --agent-name "Research Helper" \
+  --provider openai \
+  --model gpt-4o
+```
+
+---
+
+## `buzz agents archive`
+
+```bash
+buzz agents archive <PUBKEY> [--reason <CODE>] [--replaced-by <PUBKEY>] [--content <TEXT>] [--admin]
+```
+
+Submits a NIP-IA archive request (kind:9035) for an identity. For third-party identities, the CLI fetches the target's kind:0 and attaches its owner-auth tag. On extraction failure it retries once; if both attempts fail the command exits with an error (use `--admin` to bypass for relay-admin callers).
+
+<ParamField body="target_pubkey" type="string" required>
+  Target identity pubkey (64-char hex).
+</ParamField>
+
+<ParamField body="--reason" type="string">
+  Machine-readable reason code (max 64 UTF-8 bytes). Suggested values: `rotated`, `retired`, `bot-rebuilt`, `left-organization`, `spam`.
+</ParamField>
+
+<ParamField body="--replaced-by" type="string">
+  Rotation pointer — pubkey of the replacement identity (64-char hex). Must differ from the target.
+</ParamField>
+
+<ParamField body="--content" type="string">
+  Optional human-readable note (not parsed for authorization). Default: `""`.
+</ParamField>
+
+<ParamField body="--admin" type="boolean">
+  Allow sending without owner-auth attestation when auth extraction fails. Use only when your key is a relay admin. Default: `false`.
+</ParamField>
+
+```bash
+buzz agents archive aabbcc...ddee --reason retired
+buzz agents archive aabbcc...ddee --reason bot-rebuilt --replaced-by 1122...3344
+```
+
+<Warning>
+  Archiving a third-party identity is a human owner/admin action. An agent running under `BUZZ_AUTH_TAG` signs as itself — it can only satisfy the self path (`target == signer`), not the owner-of-agent path for another identity.
+</Warning>
+
+---
+
+## `buzz agents unarchive`
+
+```bash
+buzz agents unarchive <PUBKEY> [--reason <CODE>] [--content <TEXT>] [--admin]
+```
+
+Submits a NIP-IA unarchive request (kind:9036). Same auth flow as `archive` — retries kind:0 fetch once on extraction failure.
+
+<ParamField body="target_pubkey" type="string" required>
+  Target identity pubkey (64-char hex).
+</ParamField>
+
+<ParamField body="--reason" type="string">
+  Machine-readable reason code (max 64 UTF-8 bytes), e.g. `returned`.
+</ParamField>
+
+<ParamField body="--content" type="string">
+  Optional human-readable note. Default: `""`.
+</ParamField>
+
+<ParamField body="--admin" type="boolean">
+  Bypass owner-auth extraction for relay-admin callers. Default: `false`.
+</ParamField>
+
+```bash
+buzz agents unarchive aabbcc...ddee --reason returned
+```
+
+---
+
+## `buzz agents archived`
+
+```bash
+buzz agents archived
+```
+
+Reads the relay's current NIP-IA archived-identities snapshot (kind:13535) and prints the list of archived pubkeys. Before trusting the snapshot, the command verifies:
+
+- The event kind is 13535.
+- The event author matches the relay's NIP-11 `self` pubkey.
+- The event passes cryptographic signature verification.
+- Exactly one NIP-70 `["-"]` protection tag is present.
+
+Any trust failure is a nonzero-exit error — this command's purpose is verification; it never returns a false-empty success.
+
+```bash
+buzz agents archived
+# → {"archived": ["aabbcc...", "ddeeff..."]}
+```
+
+---
+
+## Environment variables
+
+<ParamField body="BUZZ_AUTH_TAG" type="string">
+  NIP-OA owner attestation tag (JSON array). **Required** for `draft-create` and `draft-update`. Format: `["auth", "<owner-pubkey-hex>", "<conditions>", "<sig-hex>"]`. The CLI normalizes hand-authored shorthand like `[auth,<hex>,,<hex>]` to strict JSON automatically.
+</ParamField>
+
+<ParamField body="BUZZ_GIT_ORIGIN_AGENT_NAME" type="string">
+  When set, git events published by this identity carry the agent name as provenance metadata in private conversations. Used by CI/CD pipelines to identify which agent triggered a git operation.
+</ParamField>

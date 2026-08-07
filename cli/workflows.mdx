@@ -1,0 +1,265 @@
+---
+title: "Buzz CLI Workflows: Create, Trigger, Approve & Manage Automations"
+sidebarTitle: "Workflows"
+description: "Reference for buzz workflows commands — list, create, update, delete, trigger, view run history, and handle approval steps for Buzz workflow automations."
+---
+
+Workflows are channel-scoped automations defined as YAML and stored as Nostr kind:30620 parameterized-replaceable events. The Buzz workflow engine watches for trigger events (kind:46020) and executes the defined steps. Approval steps pause execution until a grant (kind:46030) or deny (kind:46031) event is submitted.
+
+<Note>
+  Workflow definition events (kind:30620) are keyed by `(pubkey, workflow-id)`. The YAML definition is stored in the event content. Run history (kinds 46001, 46002, 46003) reflects execution state and approval gates. The relay does not currently emit run-history events directly; query results may be empty until the relay adds that emission path.
+</Note>
+
+---
+
+## `buzz workflows list`
+
+```bash
+buzz workflows list --channel <UUID>
+```
+
+Returns all workflow definitions in the specified channel as a JSON array of `{workflow_id, content, created_at, pubkey}` objects.
+
+<ParamField body="--channel" type="string" required>
+  Channel UUID to query for workflows.
+</ParamField>
+
+```bash
+buzz workflows list --channel 3580ca9b-47b4-4af9-b22a-1068778f26c6
+```
+
+---
+
+## `buzz workflows get`
+
+```bash
+buzz workflows get --workflow <UUID>
+```
+
+Returns a single workflow definition by its UUID as `{workflow_id, content, created_at, pubkey}`, or `null` if not found.
+
+<ParamField body="--workflow" type="string" required>
+  Workflow UUID.
+</ParamField>
+
+```bash
+buzz workflows get --workflow 7c07e659-3610-42f4-9a5e-1e9973c09da9
+```
+
+---
+
+## `buzz workflows create`
+
+```bash
+buzz workflows create --channel <UUID> --yaml <DEFINITION|->
+```
+
+Publishes a new kind:30620 workflow definition event. A fresh UUID is generated and assigned as the `d` tag. The relay may return an assigned `workflow_id` in the response; the CLI uses it if present, otherwise uses the locally generated UUID.
+
+<ParamField body="--channel" type="string" required>
+  Channel UUID the workflow belongs to. Sets the `h` tag on the event.
+</ParamField>
+
+<ParamField body="--yaml" type="string" required>
+  YAML workflow definition. Use `-` to read from stdin.
+</ParamField>
+
+```bash
+buzz workflows create \
+  --channel 3580ca9b-47b4-4af9-b22a-1068778f26c6 \
+  --yaml "$(cat my-workflow.yaml)"
+
+# Or from stdin
+cat my-workflow.yaml | buzz workflows create \
+  --channel <UUID> --yaml -
+```
+
+Output includes `workflow_id` for use with subsequent commands.
+
+### YAML workflow definition
+
+Workflow YAML is interpreted by the buzz-workflow engine. A minimal example:
+
+```yaml
+name: deploy-on-merge
+on:
+  event: pull_request_merged
+steps:
+  - name: notify
+    action: send_message
+    channel: "{{ env.CHANNEL_ID }}"
+    content: "PR merged: {{ event.subject }}"
+  - name: approve-deploy
+    action: request_approval
+    message: "Deploy to production?"
+  - name: run-deploy
+    action: run_script
+    script: ./scripts/deploy.sh
+```
+
+---
+
+## `buzz workflows update`
+
+```bash
+buzz workflows update \
+  --channel <UUID> \
+  --workflow <UUID> \
+  --yaml <DEFINITION|->
+```
+
+Publishes an updated kind:30620 event with the same `d` tag (workflow UUID), replacing the previous definition.
+
+<ParamField body="--channel" type="string" required>
+  Channel UUID the workflow belongs to.
+</ParamField>
+
+<ParamField body="--workflow" type="string" required>
+  Workflow UUID to update.
+</ParamField>
+
+<ParamField body="--yaml" type="string" required>
+  Updated YAML workflow definition. Use `-` to read from stdin.
+</ParamField>
+
+```bash
+buzz workflows update \
+  --channel <UUID> \
+  --workflow 7c07e659-3610-42f4-9a5e-1e9973c09da9 \
+  --yaml "$(cat updated-workflow.yaml)"
+```
+
+---
+
+## `buzz workflows delete`
+
+```bash
+buzz workflows delete --workflow <UUID>
+```
+
+Publishes a NIP-09 kind:5 deletion event targeting the workflow's addressable coordinate.
+
+<ParamField body="--workflow" type="string" required>
+  Workflow UUID to delete.
+</ParamField>
+
+```bash
+buzz workflows delete --workflow 7c07e659-3610-42f4-9a5e-1e9973c09da9
+```
+
+---
+
+## `buzz workflows trigger`
+
+```bash
+buzz workflows trigger --workflow <UUID> [--inputs <JSON>]
+```
+
+Submits a kind:46020 trigger event to start a workflow run. When `--inputs` is provided, it must be a valid JSON object and is embedded as the event content (accessible to workflow steps as input variables).
+
+<ParamField body="--workflow" type="string" required>
+  Workflow UUID to trigger.
+</ParamField>
+
+<ParamField body="--inputs" type="string">
+  JSON object of input variables passed to the workflow. Must be a JSON object (not an array or primitive).
+</ParamField>
+
+```bash
+# Trigger with no inputs
+buzz workflows trigger --workflow 7c07e659-3610-42f4-9a5e-1e9973c09da9
+
+# Trigger with input variables
+buzz workflows trigger \
+  --workflow 7c07e659-3610-42f4-9a5e-1e9973c09da9 \
+  --inputs '{"environment": "staging", "version": "1.2.3"}'
+```
+
+---
+
+## `buzz workflows runs`
+
+```bash
+buzz workflows runs --workflow <UUID> [--limit N]
+```
+
+Queries run history events (kinds 46001, 46002, 46003) for the specified workflow. Returns a JSON array of `{event_id, kind, content, created_at, tags}` objects sorted by the relay's response order.
+
+<ParamField body="--workflow" type="string" required>
+  Workflow UUID to query run history for.
+</ParamField>
+
+<ParamField body="--limit" type="integer">
+  Maximum number of run events to return (default: 20, max: 100).
+</ParamField>
+
+```bash
+buzz workflows runs --workflow 7c07e659-3610-42f4-9a5e-1e9973c09da9 --limit 50
+```
+
+<Note>
+  Run history is stored in the relay's `workflow_runs` database table, not as Nostr events. The relay does not currently emit execution events (kinds 46001–46003). This command will return an empty array until the relay adds event emission or a dedicated REST endpoint for run history.
+</Note>
+
+---
+
+## `buzz workflows approve`
+
+```bash
+buzz workflows approve \
+  --token <UUID> \
+  [--approved <true|false>] \
+  [--note <TEXT>]
+```
+
+Approves or denies a workflow step that is paused waiting for human review. Submits a kind:46030 (grant) or kind:46031 (deny) event. The `d` tag on the event is `hex(SHA-256(token))` — the CLI computes this automatically from the raw token UUID.
+
+<ParamField body="--token" type="string" required>
+  The approval token UUID received from the workflow's approval request step.
+</ParamField>
+
+<ParamField body="--approved" type="boolean">
+  `true` to approve (default), `false` to deny.
+</ParamField>
+
+<ParamField body="--note" type="string">
+  Optional note to include with the approval or denial.
+</ParamField>
+
+```bash
+# Approve
+buzz workflows approve --token a1b2c3d4-0000-0000-0000-000000000000
+
+# Deny with a note
+buzz workflows approve \
+  --token a1b2c3d4-0000-0000-0000-000000000000 \
+  --approved false \
+  --note "Deployment blocked: staging tests still failing"
+```
+
+---
+
+## Quick reference
+
+<CardGroup cols={2}>
+  <Card title="List workflows" icon="list">
+    ```bash
+    buzz workflows list --channel <UUID>
+    ```
+  </Card>
+  <Card title="Create workflow" icon="plus">
+    ```bash
+    buzz workflows create --channel <UUID> --yaml -
+    ```
+  </Card>
+  <Card title="Trigger a run" icon="play">
+    ```bash
+    buzz workflows trigger --workflow <UUID>
+    ```
+  </Card>
+  <Card title="Handle approval" icon="check">
+    ```bash
+    buzz workflows approve --token <UUID>
+    ```
+  </Card>
+</CardGroup>

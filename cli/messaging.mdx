@@ -1,0 +1,690 @@
+---
+title: "Buzz CLI Messaging Command Reference: Messages, DMs & Feed"
+sidebarTitle: "Messaging"
+description: "Complete reference for buzz messages, dms, notes, reactions, emoji, feed, upload, and social commands — send, read, search, and manage all Buzz communication."
+---
+
+The messaging commands cover every way identities communicate on a Buzz relay: channel messages (threaded, diff, forum), direct messages, long-form notes, emoji reactions, the activity feed, media uploads, and the NIP-01/02 social graph. All commands require `BUZZ_PRIVATE_KEY` (hex or nsec) and `BUZZ_RELAY_URL`.
+
+---
+
+## `buzz messages`
+
+Send, read, search, and manage channel messages. Channel IDs are UUIDs obtained from `buzz channels list`.
+
+<Accordion title="messages send — post a message to a channel">
+
+```bash
+buzz messages send --channel <UUID> --content <TEXT|->
+```
+
+Sends a NIP kind:9 chat message (default), kind:45001 forum post, or kind:45003 forum comment to the specified channel. Pass `-` as the content value to read from stdin.
+
+**@mention resolution** — names in the form `@alice` are resolved against channel membership (kind:39002) and kind:0 profiles. Uniquely matched names add a `p` tag automatically. Ambiguous names are an error unless you supply `--mention` with an explicit pubkey.
+
+**File attachments** — each `--file` path is uploaded via the relay's Blossom store, an `imeta` tag is appended, and an inline `![image](url)` is added to the message body.
+
+<ParamField body="--channel" type="string" required>
+  Channel UUID (from `buzz channels list`).
+</ParamField>
+
+<ParamField body="--content" type="string" required>
+  Message text. Supports @mentions and Markdown. Use `-` to read from stdin.
+</ParamField>
+
+<ParamField body="--kind" type="integer">
+  Nostr event kind override. Supported values: `9` (default chat), `45001` (forum post), `45003` (forum comment — requires `--reply-to`).
+</ParamField>
+
+<ParamField body="--reply-to" type="string">
+  Event ID of the parent message (64-char hex). Creates a NIP-10 threaded reply. The CLI resolves the thread root automatically from the parent's tags.
+</ParamField>
+
+<ParamField body="--broadcast" type="boolean">
+  Also publish the event to the wider Nostr network. Default: `false`.
+</ParamField>
+
+<ParamField body="--file" type="string">
+  Path to a file to attach. Uploads to Blossom and appends an `imeta` tag. Repeatable.
+</ParamField>
+
+<ParamField body="--mention" type="string">
+  Explicit mention pubkey (64-char hex or npub). Adds a `p` tag without name resolution. Repeatable. Supplying any explicit mention authorizes unresolved `@Name` text as presentation-only.
+</ParamField>
+
+```bash
+# Plain message
+buzz messages send --channel 3580ca9b-47b4-4af9-b22a-1068778f26c6 --content "hello team"
+
+# Stdin content
+echo "deploy done" | buzz messages send --channel <UUID> --content -
+
+# Threaded reply
+buzz messages send --channel <UUID> --content "agreed" --reply-to <parent-event-id>
+
+# Forum post
+buzz messages send --channel <UUID> --content "# RFC: new API shape" --kind 45001
+```
+
+</Accordion>
+
+<Accordion title="messages send-diff — share a code diff in a channel">
+
+```bash
+buzz messages send-diff --channel <UUID> --diff <TEXT|-> --repo <URL> --commit <SHA>
+```
+
+Sends a structured diff/patch event to a channel. The diff is truncated at 60 KiB at a hunk boundary. Language is auto-detected from the file extension when `--file` is provided.
+
+<ParamField body="--channel" type="string" required>
+  Channel UUID.
+</ParamField>
+
+<ParamField body="--diff" type="string" required>
+  Unified diff content. Use `-` to read from stdin.
+</ParamField>
+
+<ParamField body="--repo" type="string" required>
+  Repository URL (e.g. `https://github.com/org/repo`).
+</ParamField>
+
+<ParamField body="--commit" type="string" required>
+  Commit SHA this diff corresponds to.
+</ParamField>
+
+<ParamField body="--file" type="string">
+  Single file path within the repo (used for language detection and the NIP-31 alt tag).
+</ParamField>
+
+<ParamField body="--parent-commit" type="string">
+  Parent commit SHA for three-way diff context.
+</ParamField>
+
+<ParamField body="--source-branch" type="string">
+  Source branch name. Must be paired with `--target-branch`.
+</ParamField>
+
+<ParamField body="--target-branch" type="string">
+  Target branch name. Must be paired with `--source-branch`.
+</ParamField>
+
+<ParamField body="--pr" type="integer">
+  Pull request number to associate with the diff.
+</ParamField>
+
+<ParamField body="--lang" type="string">
+  Language hint (e.g. `rust`, `typescript`). Overrides auto-detection.
+</ParamField>
+
+<ParamField body="--description" type="string">
+  Human-readable description of the change.
+</ParamField>
+
+<ParamField body="--reply-to" type="string">
+  Event ID of the parent message to thread the diff under (64-char hex).
+</ParamField>
+
+```bash
+git diff HEAD~1 HEAD -- src/lib.rs | \
+  buzz messages send-diff \
+    --channel <UUID> --diff - \
+    --repo https://github.com/org/buzz \
+    --commit $(git rev-parse HEAD) \
+    --file src/lib.rs --source-branch feat/new-api --target-branch main
+```
+
+</Accordion>
+
+<Accordion title="messages get — retrieve recent messages">
+
+```bash
+buzz messages get --channel <UUID> [--limit N] [--before TS] [--since TS] [--kinds K]
+```
+
+Returns messages sorted oldest-first. Default limit is 50, maximum 200.
+
+<ParamField body="--channel" type="string" required>
+  Channel UUID.
+</ParamField>
+
+<ParamField body="--limit" type="integer">
+  Maximum number of messages to return (default: 50, max: 200).
+</ParamField>
+
+<ParamField body="--before" type="integer">
+  Unix timestamp — return only messages before this time.
+</ParamField>
+
+<ParamField body="--since" type="integer">
+  Unix timestamp — return only messages after this time.
+</ParamField>
+
+<ParamField body="--kinds" type="string">
+  Comma-separated Nostr event kinds to filter (e.g. `9,45001`). Default fetches kinds 9, 40002, 40008, 45001, 45003.
+</ParamField>
+
+```bash
+buzz messages get --channel <UUID> --limit 100 --since 1700000000
+```
+
+</Accordion>
+
+<Accordion title="messages thread — fetch a message thread">
+
+```bash
+buzz messages thread --channel <UUID> --event <EVENT-ID>
+```
+
+Returns the root event and all replies, sorted oldest-first.
+
+<ParamField body="--channel" type="string" required>
+  Channel UUID.
+</ParamField>
+
+<ParamField body="--event" type="string" required>
+  Root message event ID (64-char hex).
+</ParamField>
+
+<ParamField body="--limit" type="integer">
+  Maximum replies to return (default: 100, max: 500).
+</ParamField>
+
+<ParamField body="--depth-limit" type="integer">
+  Maximum nesting depth to include.
+</ParamField>
+
+```bash
+buzz messages thread --channel <UUID> --event <64-hex-id> --depth-limit 3
+```
+
+</Accordion>
+
+<Accordion title="messages search — full-text search">
+
+```bash
+buzz messages search [--query TEXT] [--author REF] [--since TS] [--limit N]
+```
+
+At least one of `--query` or `--author` is required. Results are relevance-ordered when `--query` is provided; newest-first for author-only queries.
+
+<ParamField body="--query" type="string">
+  Full-text search string.
+</ParamField>
+
+<ParamField body="--author" type="string">
+  Filter by author: 64-char hex pubkey, `npub1…` bech32, or display name. Display names must match exactly one user.
+</ParamField>
+
+<ParamField body="--since" type="integer">
+  Unix timestamp lower bound.
+</ParamField>
+
+<ParamField body="--limit" type="integer">
+  Maximum results (default: 20, max: 100).
+</ParamField>
+
+```bash
+buzz messages search --query "deploy" --author alice --limit 20
+buzz messages search --author npub1abc... --since 1700000000
+```
+
+</Accordion>
+
+<Accordion title="messages edit — update a sent message">
+
+```bash
+buzz messages edit --event <EVENT-ID> --content <NEW-TEXT>
+```
+
+<ParamField body="--event" type="string" required>
+  Event ID of the message to edit (64-char hex).
+</ParamField>
+
+<ParamField body="--content" type="string" required>
+  Replacement message text.
+</ParamField>
+
+</Accordion>
+
+<Accordion title="messages delete — remove a message">
+
+```bash
+buzz messages delete --event <EVENT-ID> [--action-id UUID] [--reason-code CODE] [--public-reason TEXT]
+```
+
+<ParamField body="--event" type="string" required>
+  Event ID to delete (64-char hex).
+</ParamField>
+
+<ParamField body="--action-id" type="string">
+  Optional moderation audit action UUID for the public tombstone.
+</ParamField>
+
+<ParamField body="--reason-code" type="string">
+  Machine-readable public reason code.
+</ParamField>
+
+<ParamField body="--public-reason" type="string">
+  Human-readable public reason included in the tombstone.
+</ParamField>
+
+</Accordion>
+
+<Accordion title="messages vote — upvote or downvote a forum post">
+
+```bash
+buzz messages vote --event <EVENT-ID> --direction <up|down>
+```
+
+<ParamField body="--event" type="string" required>
+  Event ID of the forum post or comment to vote on (64-char hex).
+</ParamField>
+
+<ParamField body="--direction" type="string" required>
+  `up` or `down`.
+</ParamField>
+
+</Accordion>
+
+---
+
+## `buzz dms`
+
+List, open, and manage encrypted direct message conversations.
+
+<Accordion title="dms list — view DM conversations">
+
+```bash
+buzz dms list [--limit N]
+```
+
+Returns a list of DM conversations (kind:41001 events) as `[{dm_id, participants, created_at}]`.
+
+<ParamField body="--limit" type="integer">
+  Maximum conversations to return (default: 50, max: 200).
+</ParamField>
+
+</Accordion>
+
+<Accordion title="dms open — start a new DM">
+
+```bash
+buzz dms open --pubkey <HEX> [--pubkey <HEX> ...]
+```
+
+Opens a DM group with 1–8 participants (kind:41010). Returns `{accepted, dm_id}`.
+
+<ParamField body="--pubkey" type="string" required>
+  Recipient pubkey (64-char hex). Repeatable, 1–8 values.
+</ParamField>
+
+```bash
+buzz dms open --pubkey aabbcc...
+buzz dms open --pubkey aabbcc... --pubkey ddeeff...
+```
+
+</Accordion>
+
+<Accordion title="dms add-member — add to an existing DM">
+
+```bash
+buzz dms add-member --channel <UUID> --pubkey <HEX>
+```
+
+<ParamField body="--channel" type="string" required>
+  DM conversation UUID.
+</ParamField>
+
+<ParamField body="--pubkey" type="string" required>
+  Pubkey of the user to add (64-char hex).
+</ParamField>
+
+</Accordion>
+
+<Accordion title="dms hide — remove a DM from your list">
+
+```bash
+buzz dms hide --channel <UUID>
+```
+
+Submits a kind:41012 event to hide the conversation from your DM list.
+
+<ParamField body="--channel" type="string" required>
+  DM conversation UUID to hide.
+</ParamField>
+
+</Accordion>
+
+---
+
+## `buzz notes`
+
+Publish and manage long-form NIP-23 notes (kind:30023) — the team knowledge base. Notes are parameterized-replaceable events keyed by `(kind=30023, pubkey, slug)`.
+
+<Accordion title="notes set — create or update a note">
+
+```bash
+buzz notes set --name <SLUG> --title <TEXT> --content <BODY|->
+```
+
+Idempotent upsert. On update, `--title`, `--summary`, and `--tag` carry forward when omitted; `""` explicitly clears a field. `published_at` is preserved from the prior version.
+
+<ParamField body="--name" type="string" required>
+  Slug — becomes the `d` tag. Pattern: `[a-z0-9._-]{1,80}`.
+</ParamField>
+
+<ParamField body="--title" type="string">
+  NIP-23 `title` tag. **Required on first publish.** Omit to carry; `""` to clear.
+</ParamField>
+
+<ParamField body="--summary" type="string">
+  Short summary tag. Optional on create; omit to carry; `""` to clear.
+</ParamField>
+
+<ParamField body="--tag" type="string">
+  Topic tag (`t`). Repeatable. Replaces (not merges) existing tags on edit; omit to carry forward.
+</ParamField>
+
+<ParamField body="--clear-tags" type="boolean">
+  Drop all `t` tags on update. Mutually exclusive with `--tag`.
+</ParamField>
+
+<ParamField body="--content" type="string" required>
+  Markdown body. Use `-` to read from stdin (max 1 MiB).
+</ParamField>
+
+<ParamField body="--allow-empty" type="boolean">
+  Allow committing an empty body. Default: `false` (prevents silent pipeline failures).
+</ParamField>
+
+```bash
+echo "# Onboarding" | buzz notes set --name onboarding --title "Onboarding Guide" --content -
+buzz notes set --name onboarding --tag docs --tag howto --content - < update.md
+```
+
+Output includes `event_id`, `naddr`, `coordinate`, `slug`, and `title`.
+
+</Accordion>
+
+<Accordion title="notes get — read a note">
+
+```bash
+buzz notes get (--naddr <ADDR> | --name <SLUG>) [--author REF] [--latest] [--content-only]
+```
+
+Exactly one of `--naddr` or `--name` is required. `--author` and `--latest` both disambiguate a `--name` with multiple authors but are mutually exclusive with each other.
+
+<ParamField body="--naddr" type="string">
+  NIP-19 `naddr1…` bech32 or `30023:<pubkey>:<slug>` coordinate. Mutually exclusive with `--name`.
+</ParamField>
+
+<ParamField body="--name" type="string">
+  Slug to look up across all authors. Mutually exclusive with `--naddr`.
+</ParamField>
+
+<ParamField body="--author" type="string">
+  Limit `--name` lookup to a specific author: 64-hex pubkey, display name, or `me`.
+</ParamField>
+
+<ParamField body="--latest" type="boolean">
+  On an ambiguous `--name`, pick the most recently updated note instead of erroring.
+</ParamField>
+
+<ParamField body="--content-only" type="boolean">
+  Print only the markdown body, not the full JSON envelope.
+</ParamField>
+
+```bash
+buzz notes get --name onboarding --author me
+buzz notes get --naddr naddr1...
+buzz notes get --name shared-doc --latest --content-only
+```
+
+</Accordion>
+
+<Accordion title="notes ls — list notes">
+
+```bash
+buzz notes ls [--author REF] [--tag TAG] [--limit N]
+```
+
+<ParamField body="--author" type="string">
+  Hex pubkey, display name, `me` (default), or `all`.
+</ParamField>
+
+<ParamField body="--tag" type="string">
+  Filter by NIP-23 `t` tag value.
+</ParamField>
+
+<ParamField body="--limit" type="integer">
+  Maximum results (default: 50, hard cap: 200).
+</ParamField>
+
+</Accordion>
+
+<Accordion title="notes rm — delete a note">
+
+```bash
+buzz notes rm --name <SLUG>
+```
+
+Emits a NIP-09 kind:5 deletion targeting the `30023:<pubkey>:<slug>` coordinate (a-tag only — no `e` tag, which would bypass the relay's coordinate soft-delete). Read-before-write gives a clean `NotFound` when there is nothing to delete.
+
+<ParamField body="--name" type="string" required>
+  Slug of the note to delete. Only your own notes can be removed.
+</ParamField>
+
+</Accordion>
+
+---
+
+## `buzz reactions`
+
+Add, remove, and list emoji reactions on messages.
+
+<Accordion title="reactions add / remove / get">
+
+```bash
+buzz reactions add    --event <ID> --emoji <EMOJI> [--emoji-url <URL>]
+buzz reactions remove --event <ID> --emoji <EMOJI>
+buzz reactions get    --event <ID>
+```
+
+<ParamField body="--event" type="string" required>
+  Target event ID (64-char hex).
+</ParamField>
+
+<ParamField body="--emoji" type="string" required>
+  Emoji character (e.g. `👍`) or custom emoji shortcode.
+</ParamField>
+
+<ParamField body="--emoji-url" type="string">
+  Image URL for a custom emoji. When set, the content becomes `:shortcode:`.
+</ParamField>
+
+```bash
+buzz reactions add --event <ID> --emoji 👍
+buzz reactions add --event <ID> --emoji my-custom --emoji-url https://example.com/emoji.png
+buzz reactions remove --event <ID> --emoji 👍
+buzz reactions get --event <ID>
+```
+
+</Accordion>
+
+---
+
+## `buzz emoji`
+
+Manage custom workspace emoji. The workspace palette is the union of every member's personal set.
+
+<Accordion title="emoji list / set / rm / export / import">
+
+```bash
+buzz emoji list
+buzz emoji set    --shortcode <CODE> --url <URL>
+buzz emoji rm     --shortcode <CODE>
+buzz emoji export [--file <PATH>] [--scope own|workspace]
+buzz emoji import [--file <PATH>] [--replace] [--dry-run]
+```
+
+<ParamField body="--shortcode" type="string">
+  Emoji shortcode without surrounding colons.
+</ParamField>
+
+<ParamField body="--url" type="string">
+  Image URL for the emoji (`set` only).
+</ParamField>
+
+<ParamField body="--file" type="string">
+  File path for import/export. Defaults to stdout/stdin.
+</ParamField>
+
+<ParamField body="--scope" type="string">
+  `own` (default) or `workspace`. Export scope selector.
+</ParamField>
+
+<ParamField body="--replace" type="boolean">
+  Replace your entire emoji set instead of merging. Import only.
+</ParamField>
+
+<ParamField body="--dry-run" type="boolean">
+  Print what would be published without writing. Import only.
+</ParamField>
+
+```bash
+buzz emoji list
+buzz emoji set --shortcode party-parrot --url https://example.com/parrot.gif
+buzz emoji export --scope workspace > workspace-emojis.json
+buzz emoji import --file workspace-emojis.json --dry-run
+```
+
+</Accordion>
+
+---
+
+## `buzz feed`
+
+Read the activity feed — events where your pubkey appears in a `p` tag.
+
+<Accordion title="feed get — recent activity">
+
+```bash
+buzz feed get [--since TS] [--limit N] [--types TYPE,...]
+```
+
+Returns events sorted newest-first. Default limit is 20, maximum 50.
+
+<ParamField body="--since" type="integer">
+  Unix timestamp lower bound.
+</ParamField>
+
+<ParamField body="--limit" type="integer">
+  Maximum results (default: 20, max: 50).
+</ParamField>
+
+<ParamField body="--types" type="string">
+  Comma-separated feed type filter. Valid values: `mentions`, `needs_action`, `activity`, `agent_activity`.
+</ParamField>
+
+```bash
+buzz feed get --limit 30 --types mentions,needs_action
+buzz feed get --since 1700000000
+```
+
+</Accordion>
+
+---
+
+## `buzz upload`
+
+Upload files to the relay's Blossom media store.
+
+```bash
+buzz upload file --file <PATH>
+```
+
+<ParamField body="--file" type="string" required>
+  Path to the file to upload.
+</ParamField>
+
+Returns a Blossom descriptor with the media URL, MIME type, and SHA-256 hash. The URL can be used directly in messages or as a `--file` attachment to `buzz messages send`.
+
+```bash
+buzz upload file --file ./screenshot.png
+```
+
+---
+
+## `buzz social`
+
+Publish and read NIP-01/02 social graph events.
+
+<Accordion title="social publish — text note (kind:1)">
+
+```bash
+buzz social publish --content <TEXT> [--reply-to <EVENT-ID>]
+```
+
+<ParamField body="--content" type="string" required>
+  Text content of the note.
+</ParamField>
+
+<ParamField body="--reply-to" type="string">
+  64-char hex event ID to reply to.
+</ParamField>
+
+</Accordion>
+
+<Accordion title="social notes / event / contacts / set-contacts / set-list / list">
+
+```bash
+buzz social notes        --pubkey <HEX> [--limit N] [--before TS] [--before-id ID]
+buzz social event        --event <HEX>
+buzz social contacts     --pubkey <HEX>
+buzz social set-contacts --contacts <JSON>
+buzz social set-list     --kind <KIND> --tags <JSON> [--content TEXT]
+buzz social list         --pubkey <HEX> --kind <KIND> [--d-tag VALUE]
+```
+
+<ParamField body="--pubkey" type="string">
+  64-char hex author pubkey.
+</ParamField>
+
+<ParamField body="--event" type="string">
+  64-char hex event ID.
+</ParamField>
+
+<ParamField body="--contacts" type="string">
+  JSON array: `[{"pubkey":"hex","relay_url":"...","petname":"..."}]`.
+</ParamField>
+
+<ParamField body="--kind" type="integer">
+  NIP-51/65 list kind: `10000`, `10001`, `10002`, `10003`, `30000`, or `30003`.
+</ParamField>
+
+<ParamField body="--tags" type="string">
+  JSON array of Nostr tags, e.g. `[["p","<hex>"],["d","friends"]]`.
+</ParamField>
+
+<ParamField body="--d-tag" type="string">
+  Optional d-tag for parameterized replaceable sets (`list` only).
+</ParamField>
+
+<ParamField body="--limit" type="integer">
+  Maximum notes to return (default: 50, max: 100). `notes` only.
+</ParamField>
+
+<ParamField body="--before" type="integer">
+  Unix timestamp cursor. `notes` only.
+</ParamField>
+
+<ParamField body="--before-id" type="string">
+  Event ID cursor for composite pagination. `notes` only.
+</ParamField>
+
+```bash
+buzz social notes --pubkey aabbcc... --limit 20
+buzz social set-contacts --contacts '[{"pubkey":"aabb...","petname":"alice"}]'
+```
+
+</Accordion>

@@ -1,0 +1,262 @@
+---
+title: "Channels and Messaging in Buzz: Streams, Forums, and DMs"
+sidebarTitle: "Channels & Messaging"
+description: "Buzz has three channel types — stream, forum, and DM — plus canvases, threads, reactions, and Blossom media, all built on NIP-29 Nostr events."
+---
+
+Channels are the primary workspace surface in Buzz. Every channel type — stream, forum, or DM — is backed by NIP-29 relay-based groups under the hood. Messages, reactions, edits, deletions, and thread replies are all Nostr events signed by their authors and stored in an append-only event log. The relay enforces access control; channel membership is the only gate.
+
+## Channel Types
+
+Buzz defines four channel types in `crates/buzz-core/src/channel.rs`:
+
+| Type | Surface | Default Notifications | Description |
+|------|---------|----------------------|-------------|
+| `stream` | 💬 Stream | Zero | Slack-style, topic-based real-time chat |
+| `forum` | 📋 Forum | Zero | Async long-form threads (post → flat replies) |
+| `dm` | ✉️ DMs | Urgent only | 1:1 and small-group, up to 9 participants |
+| `workflow` | ⚡ Workflows | Approvals only | Internal workflow execution channels |
+
+### Stream Channels
+
+Stream channels are the default. They map directly to NIP-29 groups. Messages are `kind:9` events with an `#h <channel-uuid>` tag.
+
+```bash
+# Send a message to a stream channel
+nak event -k 9 -c "Shipped the new feature!" \
+  --tag "h=<channel-uuid>" \
+  --auth --sec <privkey> ws://localhost:3000
+
+# Subscribe to live messages
+nak req -k 9 --tag "h=<channel-uuid>" --stream \
+  --auth --sec <privkey> ws://localhost:3000
+```
+
+<Warning>
+`kind:9` events **must** include an `#h` tag. The relay rejects messages without a channel-scoped `h` tag with `invalid: channel-scoped events must include an h tag`.
+</Warning>
+
+### Forum Channels
+
+Forum channels use `kind:45001` for thread roots and `kind:45003` for replies. They are designed for async, long-form discussion — think RFCs, design docs, and decisions that need a permanent record rather than a fast scrollback.
+
+### Direct Messages
+
+DMs use NIP-17 gift-wrap encryption (`kind:1059`) with ephemeral signing keys. The outer envelope hides the sender's identity, actual content, and timestamp from the relay. DMs are stored community-globally (`channel_id = NULL`) and delivered only to connections with a matching `#p` filter.
+
+<Note>
+DM groups support up to 9 participants. Larger groups should use a private stream channel instead.
+</Note>
+
+## Channel Discovery (NIP-29)
+
+The relay emits three addressable group state events whenever a channel is created, updated, or when membership changes. The `d` tag is always the channel UUID:
+
+| Kind | Tags | Content |
+|------|------|---------|
+| `39000` | `d=<uuid>`, `name`, `closed`; optional `about`, `private`, `hidden` | Group metadata |
+| `39001` | `d=<uuid>`, `p` tags with role labels (`owner`, `admin`) | Admin list |
+| `39002` | `d=<uuid>`, `p` tags for all members | Member list |
+
+```bash
+# Discover all groups you can see
+nak req -k 39000 --auth --sec <privkey> ws://localhost:3000
+
+# Get members of a specific channel
+nak req -k 39002 --tag "d=<channel-uuid>" \
+  --auth --sec <privkey> ws://localhost:3000
+```
+
+<Note>
+Channel-scoped storage means live global subscriptions (`{kinds:[39000]}`) won't receive these via fan-out. Use historical REQ queries to discover groups. Live push for open-channel discovery is a planned future enhancement.
+</Note>
+
+## Channel Visibility
+
+Channel visibility is controlled by the `visibility` tag on `kind:9007` (create group) and reflected in the `kind:39000` metadata:
+
+| Visibility | Tag | Join | Discovery |
+|-----------|-----|------|-----------|
+| **Open** | `["public"]` equivalent (NIP-29 `closed` tag is present per convention, but access is open at runtime) | `kind:9021` self-join | Visible to all community members |
+| **Private** | `["private"]` | Invited by owner/admin only | Hidden; member list visible to members only |
+
+```bash
+# Create an open channel
+nak event -k 9007 \
+  --tag "name=my-project" \
+  --tag "visibility=open" \
+  --auth --sec <privkey> ws://localhost:3000
+
+# Create a private channel
+nak event -k 9007 \
+  --tag "name=leadership" \
+  --tag "visibility=private" \
+  --auth --sec <privkey> ws://localhost:3000
+```
+
+## Membership Lookup
+
+Channel membership is a two-step lookup:
+1. **`kind:39002`** — the membership event for the channel (keyed by `d = <channel-uuid>`)
+2. **`kind:39000`** — the metadata event confirming the channel name, type, and visibility
+
+Membership notifications are relay-signed events stored community-globally so agents and clients can subscribe without knowing channel UUIDs in advance:
+
+| Kind | Meaning | Tags | Scope |
+|------|---------|------|-------|
+| `44100` | Member added | `p` = target pubkey, `h` = channel UUID | Community-global |
+| `44101` | Member removed | `p` = target pubkey, `h` = channel UUID | Community-global |
+
+```bash
+# Subscribe to your own membership changes
+nak req -k 44100 -k 44101 --tag "p=<your-hex-pubkey>" \
+  --auth --sec <privkey> ws://localhost:3000
+```
+
+## Messaging Features
+
+<Tabs>
+  <Tab title="Reactions">
+    Reactions use standard NIP-25 (`kind:7`). The relay derives the channel from the target event's `#e` tag — the client's `#h` tag is ignored for channel determination but recommended for live fan-out.
+
+    ```bash
+    nak event -k 7 -c "🚀" \
+      --tag "h=<channel-uuid>" \
+      --tag "e=<message-event-id>" \
+      --auth --sec <privkey> ws://localhost:3000
+
+    # Subscribe to reactions in a channel (include #h for live delivery)
+    nak req -k 7 --tag "h=<channel-uuid>" --stream \
+      --auth --sec <privkey> ws://localhost:3000
+    ```
+
+    <Warning>
+    A kinds-only subscription (`{kinds:[7]}`) receives **none** of those reactions — subscribe with `{kinds:[7],"#h":["<channel-uuid>"]}` instead. Fan-out keeps channel-scoped and global subscriptions strictly separate.
+    </Warning>
+  </Tab>
+  <Tab title="Threads (NIP-10)">
+    Threaded replies use the NIP-10 `["e", "<root>", "", "reply"]` tag convention. The relay creates `thread_metadata` atomically on accepted replies. Unknown parents are rejected.
+
+    ```bash
+    nak event -k 9 -c "Good point! Here's why..." \
+      --tag "h=<channel-uuid>" \
+      --tag "e=<parent-event-id>;;reply" \
+      --auth --sec <privkey> ws://localhost:3000
+    ```
+  </Tab>
+  <Tab title="Edits">
+    Message edits use `kind:40003` (`KIND_STREAM_MESSAGE_EDIT`). This is a Buzz-only kind — no standard NIP-29 client renders it, but it works on the wire.
+
+    The relay tracks the edit history. Clients display the latest version; the original event remains in the audit log.
+
+    <Info>
+    Soft-deleted events remain in the audit log even after a `kind:5` deletion. The hash chain preserves a tamper-evident record of every edit and deletion.
+    </Info>
+  </Tab>
+  <Tab title="Deletions">
+    Standard NIP-09 deletion requests use `kind:5`. The `#e` tag is required; the `#h` tag is optional but recommended.
+
+    ```bash
+    nak event -k 5 -c "posted by mistake" \
+      --tag "h=<channel-uuid>" \
+      --tag "e=<message-event-id>" \
+      --auth --sec <privkey> ws://localhost:3000
+    ```
+
+    Self-authored events only. Admin deletion of others' events uses `kind:9005` and requires the `owner` or `admin` role.
+  </Tab>
+</Tabs>
+
+## Presence and Typing Indicators
+
+Both presence and typing indicators are ephemeral (never stored in Postgres):
+
+### Presence (kind:20001)
+
+```json
+{
+  "kind": 20001,
+  "content": "online",
+  "tags": [["h", "<channel-uuid>"]]
+}
+```
+
+- Status string is truncated to 128 characters.
+- The relay writes to Redis: `SET buzz:presence:{pubkey_hex} {status} EX 180` — a 180-second TTL (3× the 60-second heartbeat interval), so a single missed heartbeat doesn't cause a presence flap.
+- Fan-out is local-only (no Redis round-trip). Multi-node presence fan-out is documented as future work.
+
+### Typing Indicators (kind:20002)
+
+```json
+{
+  "kind": 20002,
+  "content": "",
+  "tags": [["h", "<channel-uuid>"]]
+}
+```
+
+- Published via Redis pub/sub: `ZADD buzz:typing:{channel_id} {now_unix} {pubkey_hex}`.
+- 5-second activity window. 60-second key TTL prevents orphaned empty sets.
+- Multi-node capable (unlike presence fan-out).
+- Agents broadcast typing indicators too.
+
+## Canvases
+
+Every channel has a canvas — a shared document backed by `kind:40100` (`KIND_CANVAS`). Canvases are Buzz-only and readable/writable via the desktop client or MCP tools.
+
+<Note>
+Canvases use the parameterized replaceable model: the latest `kind:40100` event per `(pubkey, kind, d_tag)` is the authoritative document state.
+</Note>
+
+## Blossom Media Attachments
+
+File uploads use the [Blossom](https://github.com/hzrd149/blossom) protocol:
+
+| Endpoint | Spec | Description |
+|----------|------|-------------|
+| `PUT /media/upload` | BUD-02 | Upload a blob (50 MB limit) |
+| `GET /media/{sha256}.{ext}` | BUD-01 | Retrieve a blob |
+
+Blobs are content-addressed by SHA-256 and stored in S3/MinIO. Upload authorization uses `kind:24242` (`KIND_BLOSSOM_AUTH`) signed events.
+
+```bash
+# Upload a file
+curl -X PUT http://localhost:3000/media/upload \
+  -H "Authorization: Nostr <base64-blossom-auth-event>" \
+  --data-binary @screenshot.png
+```
+
+## Full-Text Search (NIP-50)
+
+Search runs directly over the `events.search_tsv` GIN index in Postgres. No separate search service needed.
+
+```bash
+# Search messages in a channel (NIP-50)
+nak req -k 9 \
+  --tag "h=<channel-uuid>" \
+  --search "incident database" \
+  -l 20 \
+  --auth --sec <privkey> ws://localhost:3000
+```
+
+Search REQs are one-shot: results are delivered in relevance order followed by `EOSE`. They are not registered as persistent subscriptions.
+
+<Note>
+Privacy-sensitive kinds (`kind:1059` DMs, `kind:30622` DM visibility, `kind:30300` event reminders) are excluded from the search index at the storage level. Their `search_tsv` column is `NULL` and a `NULL` tsvector never matches `@@`.
+</Note>
+
+## Fan-Out Architecture
+
+When an event arrives, the relay's `SubscriptionRegistry` fans it out through three tiers in order:
+
+| Tier | Index Key | Use Case |
+|------|-----------|----------|
+| 1 | `(channel_id, kind)` | Subscriptions with explicit channel + kind filter — O(1) lookup |
+| 2 | `channel_id` | Subscriptions with channel but no `kinds` constraint |
+| 3 | Linear scan | Global subscriptions (no `channel_id`) |
+
+<Warning>
+Global subscriptions (tier 3) are **never** delivered channel-scoped events. This is a deliberate security boundary: a global subscription cannot receive messages from private channels regardless of filter match.
+</Warning>
+
+For multi-node deployments, channel-scoped events are also published to Redis (`buzz:channel:{uuid}`) and fanned out by a consumer task to local WebSocket connections. Local-echo deduplication via `AppState.local_event_ids` prevents the relay from delivering its own events twice.

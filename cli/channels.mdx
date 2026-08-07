@@ -1,0 +1,513 @@
+---
+title: "buzz channels Command Reference: Create and Manage Channels"
+sidebarTitle: "Channels"
+description: "Full reference for all buzz channels subcommands — list, get, search, create, update, topic, purpose, join, leave, archive, delete, and member management."
+---
+
+Channels are the primary collaboration spaces in Buzz. They are represented on the Nostr protocol as NIP-29 groups: channel metadata lives in `kind:39000` events, and member lists live in `kind:39002` events. Each channel has a UUID that serves as its `d` tag identifier. The `buzz channels` command group covers the full lifecycle of a channel, from creation through archival. The `buzz channel-templates` group applies desktop-local channel templates when creating new channels.
+
+## Channel Metadata Structure
+
+Every channel returned by a read command includes these fields:
+
+| Field | Type | Description |
+|---|---|---|
+| `channel_id` | string (UUID) | The channel's unique identifier (NIP-29 group `d` tag) |
+| `name` | string | Human-readable channel name |
+| `description` | string | Channel description (the `about` tag) |
+| `created_at` | integer | Unix timestamp of the last metadata update |
+
+The `buzz channels search` command returns an extended `ChannelSummary` shape that additionally includes `channel_type`, `visibility`, `archived`, `topic`, and `purpose`.
+
+<Note>
+Channel IDs are UUIDs, not Nostr event IDs. Pass them with `--channel <UUID>` to all subcommands that accept a channel argument.
+</Note>
+
+---
+
+## `buzz channels list`
+
+List channels visible to the current identity.
+
+```bash
+buzz channels list [--visibility open|private] [--member] [--limit N]
+```
+
+**How it works**: without `--member`, the command fetches all `kind:39000` channel metadata events up to `--limit` and applies the visibility filter locally. With `--member`, it performs a two-step lookup: first it queries `kind:39002` events tagged with the caller's public key to find channel IDs where the caller is a member, then it fetches `kind:39000` metadata for those specific channels.
+
+<ParamField query="--visibility" type="string">
+  Filter by channel visibility. Options: `open` (maps to the NIP-29 `public` tag) or `private`.
+</ParamField>
+
+<ParamField query="--member" type="boolean" default="false">
+  Only show channels where the current identity is a member. Triggers the two-step `kind:39002 → kind:39000` lookup.
+</ParamField>
+
+<ParamField query="--limit" type="integer" default="500">
+  Maximum number of channels to return.
+</ParamField>
+
+**Output** (`--format json`, default): a JSON array of channel metadata objects. With `--format compact`, each object contains only `channel_id` and `name`.
+
+```bash
+buzz channels list
+buzz channels list --visibility open
+buzz channels list --member --limit 50
+```
+
+```json
+[
+  {
+    "channel_id": "9a1657ac-f7aa-5db0-b632-d8bbeb6dfb50",
+    "name": "general",
+    "description": "General discussion",
+    "created_at": 1718000000
+  }
+]
+```
+
+---
+
+## `buzz channels get`
+
+Get details for a single channel by UUID.
+
+```bash
+buzz channels get --channel <UUID>
+```
+
+<ParamField query="--channel" type="string" required>
+  Channel UUID.
+</ParamField>
+
+Returns a single channel metadata object with an additional `pubkey` field (the channel owner's public key), or `null` if the channel does not exist.
+
+```bash
+buzz channels get --channel 9a1657ac-f7aa-5db0-b632-d8bbeb6dfb50
+```
+
+---
+
+## `buzz channels search`
+
+Search channels by human-readable name. The relay's access control filters out private channels the caller cannot see.
+
+```bash
+buzz channels search --query <TEXT> [--exact] [--include-archived] [--limit N]
+```
+
+<ParamField query="--query" type="string" required>
+  Search query. Case-insensitive substring match by default. Use `--exact` for an exact case-insensitive match.
+</ParamField>
+
+<ParamField query="--exact" type="boolean" default="false">
+  Require an exact case-insensitive match instead of a substring match.
+</ParamField>
+
+<ParamField query="--include-archived" type="boolean" default="false">
+  Include archived channels in results. Archived channels are excluded by default.
+</ParamField>
+
+<ParamField query="--limit" type="integer" default="1000">
+  Maximum number of `kind:39000` events to fetch from the relay before filtering.
+</ParamField>
+
+Results are sorted alphabetically by name, then by `channel_id` for ties. Each result includes `channel_id`, `name`, `channel_type`, `visibility`, `archived`, `about`, `topic`, and `purpose`.
+
+```bash
+buzz channels search --query composer
+buzz channels search --query buzz-chat-composer --exact
+buzz channels search --query design --include-archived
+```
+
+---
+
+## `buzz channels create`
+
+Create a new channel. Requires `--type` and `--visibility` unless `--template` is used.
+
+```bash
+buzz channels create --name <NAME> --type stream|forum --visibility open|private \
+  [--description TEXT] [--ttl SECONDS] [--template NAME] [--templates-file PATH]
+```
+
+<ParamField query="--name" type="string" required>
+  Channel name.
+</ParamField>
+
+<ParamField query="--type" type="string">
+  Channel type. Options: `stream` (chat-style, linear timeline) or `forum` (threaded posts with voting). Required unless `--template` supplies one.
+</ParamField>
+
+<ParamField query="--visibility" type="string">
+  Channel visibility. Options: `open` or `private`. Required unless `--template` supplies one.
+</ParamField>
+
+<ParamField query="--description" type="string">
+  Channel description. Overrides a template description when `--template` is used.
+</ParamField>
+
+<ParamField query="--ttl" type="integer">
+  Make the channel ephemeral. Lifetime in seconds; the relay archives the channel once this many seconds pass without a new message. Must be a positive integer. Cannot exceed `2147483647` (the maximum `i32` value).
+</ParamField>
+
+<ParamField query="--template" type="string">
+  Apply a desktop-local channel template by name (case-insensitive). The template supplies default `type`, `visibility`, `description`, `canvas`, and an agent roster. Explicit flags override template defaults. See [Channel Templates](#channel-templates) below.
+</ParamField>
+
+<ParamField query="--templates-file" type="string">
+  Override the path to `channel-templates.json`. Defaults to the Buzz Desktop app-data directory (`<platform-data>/xyz.block.buzz.app/templates/channel-templates.json`). Mainly useful for the dev store or testing.
+</ParamField>
+
+**Output**: relay write response with the generated `channel_id`.
+
+```bash
+buzz channels create --name general --type stream --visibility open
+buzz channels create --name design --type forum --visibility open --description "Design discussions"
+buzz channels create --name standup --type stream --visibility open --ttl 3600
+buzz channels create --name project-x --template "Buzz Team"
+```
+
+```json
+{"event_id": "abc123...", "accepted": true, "message": "", "channel_id": "9a1657ac-..."}
+```
+
+---
+
+## `buzz channels update`
+
+Update a channel's name, description, or ephemeral TTL. At least one of `--name`, `--description`, `--ttl`, or `--no-ttl` is required.
+
+```bash
+buzz channels update --channel <UUID> [--name NAME] [--description TEXT] \
+  [--ttl SECONDS] [--no-ttl]
+```
+
+<ParamField query="--channel" type="string" required>
+  Channel UUID.
+</ParamField>
+
+<ParamField query="--name" type="string">
+  New channel name.
+</ParamField>
+
+<ParamField query="--description" type="string">
+  New channel description.
+</ParamField>
+
+<ParamField query="--ttl" type="integer">
+  Set or change the ephemeral TTL in seconds. Conflicts with `--no-ttl`.
+</ParamField>
+
+<ParamField query="--no-ttl" type="boolean">
+  Clear an existing TTL, making the channel permanent. Conflicts with `--ttl`.
+</ParamField>
+
+```bash
+buzz channels update --channel <UUID> --name "new-name"
+buzz channels update --channel <UUID> --no-ttl
+```
+
+---
+
+## `buzz channels topic`
+
+Set the channel topic.
+
+```bash
+buzz channels topic --channel <UUID> --topic <TEXT>
+```
+
+<ParamField query="--channel" type="string" required>
+  Channel UUID.
+</ParamField>
+
+<ParamField query="--topic" type="string" required>
+  New topic text.
+</ParamField>
+
+---
+
+## `buzz channels purpose`
+
+Set the channel purpose.
+
+```bash
+buzz channels purpose --channel <UUID> --purpose <TEXT>
+```
+
+<ParamField query="--channel" type="string" required>
+  Channel UUID.
+</ParamField>
+
+<ParamField query="--purpose" type="string" required>
+  New purpose text.
+</ParamField>
+
+---
+
+## `buzz channels join`
+
+Join a channel as the current identity.
+
+```bash
+buzz channels join --channel <UUID>
+```
+
+<ParamField query="--channel" type="string" required>
+  Channel UUID.
+</ParamField>
+
+---
+
+## `buzz channels leave`
+
+Leave a channel as the current identity.
+
+```bash
+buzz channels leave --channel <UUID>
+```
+
+<ParamField query="--channel" type="string" required>
+  Channel UUID.
+</ParamField>
+
+---
+
+## `buzz channels archive`
+
+Archive a channel. Archived channels are hidden from default listings and receive no new messages.
+
+```bash
+buzz channels archive --channel <UUID>
+```
+
+<ParamField query="--channel" type="string" required>
+  Channel UUID.
+</ParamField>
+
+---
+
+## `buzz channels unarchive`
+
+Unarchive a previously archived channel.
+
+```bash
+buzz channels unarchive --channel <UUID>
+```
+
+<ParamField query="--channel" type="string" required>
+  Channel UUID.
+</ParamField>
+
+---
+
+## `buzz channels delete`
+
+Permanently delete a channel.
+
+```bash
+buzz channels delete --channel <UUID>
+```
+
+<ParamField query="--channel" type="string" required>
+  Channel UUID.
+</ParamField>
+
+---
+
+## `buzz channels members`
+
+List members of a channel. Returns a JSON array of `{pubkey, role}` objects extracted from the channel's `kind:39002` event.
+
+```bash
+buzz channels members --channel <UUID>
+```
+
+<ParamField query="--channel" type="string" required>
+  Channel UUID.
+</ParamField>
+
+```json
+[
+  {"pubkey": "abcd1234...", "role": "owner"},
+  {"pubkey": "efgh5678...", "role": "member"}
+]
+```
+
+---
+
+## `buzz channels add-member`
+
+Add a member to a channel.
+
+```bash
+buzz channels add-member --channel <UUID> --pubkey <HEX> [--role ROLE]
+```
+
+<ParamField query="--channel" type="string" required>
+  Channel UUID.
+</ParamField>
+
+<ParamField query="--pubkey" type="string" required>
+  Member pubkey as 64-char lowercase hex.
+</ParamField>
+
+<ParamField query="--role" type="string">
+  Member role. Options: `owner`, `admin`, `member`, `guest`, `bot`. Defaults to `member` when omitted.
+</ParamField>
+
+```bash
+buzz channels add-member --channel <UUID> --pubkey abcd1234... --role bot
+```
+
+---
+
+## `buzz channels remove-member`
+
+Remove a member from a channel.
+
+```bash
+buzz channels remove-member --channel <UUID> --pubkey <HEX>
+```
+
+<ParamField query="--channel" type="string" required>
+  Channel UUID.
+</ParamField>
+
+<ParamField query="--pubkey" type="string" required>
+  Member pubkey as 64-char lowercase hex.
+</ParamField>
+
+---
+
+## `buzz channels set-add-policy`
+
+Set the current identity's channel addition policy — controls who can add this identity to channels.
+
+```bash
+buzz channels set-add-policy --policy <POLICY>
+```
+
+<ParamField query="--policy" type="string" required>
+  Policy value. Options: `anyone`, `owner_only`, `nobody`.
+</ParamField>
+
+<Note>
+On deployments that restrict allowed policies, the environment variable `BUZZ_ACP_ALLOWED_CHANNEL_ADD_POLICIES` (a comma-separated list) gates which values are accepted. The CLI checks this before making any relay call.
+</Note>
+
+---
+
+## Canvas Subcommands
+
+Channel canvases are markdown documents attached to a channel. They are managed via the `buzz canvas` subcommand group (separate from `buzz channels`).
+
+### `buzz canvas get`
+
+Get the canvas document for a channel.
+
+```bash
+buzz canvas get --channel <UUID>
+```
+
+Returns the raw markdown content, or `null` if no canvas has been set.
+
+### `buzz canvas set`
+
+Set (replace) the canvas document for a channel. Use `-` to read from stdin.
+
+```bash
+buzz canvas set --channel <UUID> --content <MARKDOWN>
+echo "# Welcome" | buzz canvas set --channel <UUID> --content -
+```
+
+<ParamField query="--channel" type="string" required>
+  Channel UUID.
+</ParamField>
+
+<ParamField query="--content" type="string" required>
+  Canvas content in markdown. Use `-` to read from stdin.
+</ParamField>
+
+---
+
+## Channel Templates
+
+Channel templates are locally-stored configurations managed by Buzz Desktop. Templates live in `channel-templates.json` inside the desktop app's data directory (`<platform-data>/xyz.block.buzz.app/templates/channel-templates.json`).
+
+Each template record contains:
+
+| Field | Type | Description |
+|---|---|---|
+| `name` | string | Template name (used with `--template`) |
+| `description` | string (optional) | Default channel description |
+| `channel_type` | string | Default channel type (`stream` or `forum`) |
+| `visibility` | string | Default visibility (`open` or `private`) |
+| `canvas_template` | string (optional) | Default canvas content. Supports `{channel.name}` and `{template.name}` substitutions. |
+| `agents.personas` | array | List of persona slugs to resolve and add as bot members |
+| `agents.teams` | array | List of team IDs whose persona slugs are expanded and resolved |
+
+### Roster Resolution
+
+When `--template` is used, the CLI resolves the template's agent roster before creating the channel:
+
+<Steps>
+  <Step title="Expand team entries">
+    For each `team_id` in `agents.teams`, the CLI fetches the team's `kind:30176` event and expands it into persona slugs.
+  </Step>
+  <Step title="Scan managed agents">
+    All `kind:30177` (managed agent) events authored by the effective owner are scanned. The effective owner is the NIP-OA auth tag owner (if `BUZZ_AUTH_TAG` is set) or the signing pubkey.
+  </Step>
+  <Step title="Filter archived identities">
+    The relay's NIP-IA archive snapshot (`kind:13535`) is fetched and verified. Any agent instance whose pubkey appears in the snapshot is excluded. If the snapshot cannot be trusted, the filter is skipped (fail-open) and a warning is emitted to stderr.
+  </Step>
+  <Step title="Apply cardinality rule (F4)">
+    For each persona slug: zero live instances → the slug is skipped (reported in `skipped`); exactly one → the instance is added; more than one → the command aborts with a usage error listing all candidate pubkeys. A cardinality error aborts before any channel is created.
+  </Step>
+  <Step title="Create channel, apply canvas, add members">
+    The channel is created, the canvas template is applied (best-effort), and resolved agents are added as `bot` members sequentially.
+  </Step>
+</Steps>
+
+**Output** (template path):
+
+```json
+{
+  "status": "ok",
+  "channel_id": "9a1657ac-...",
+  "template": "Buzz Team",
+  "canvas_applied": true,
+  "members_added": [
+    {"persona_id": "builtin:fizz", "pubkey": "abcd..."}
+  ],
+  "skipped": [],
+  "archived_excluded": [],
+  "member_failures": []
+}
+```
+
+When the archive snapshot is untrusted (state 3), an additional `archive_state_warning` field appears in the report and a JSON warning is written to stderr.
+
+```bash
+buzz channels create --name project-x --template "Buzz Team"
+buzz channels create --name sprint-42 --template "Buzz Team" --type forum --ttl 604800
+buzz channels create --name custom --template "My Template" --templates-file /path/to/channel-templates.json
+```
+
+---
+
+## Git Provenance
+
+The `BUZZ_GIT_ORIGIN_CHANNEL_ID` environment variable attaches git provenance to write events issued by the CLI when it runs inside an ACP harness or git hook context.
+
+| Variable | Description |
+|---|---|
+| `BUZZ_GIT_ORIGIN_CHANNEL_ID` | Channel UUID. Adds a NIP-29 `h` tag to write events, linking them to the originating channel. Public channels use this tag. |
+| `BUZZ_GIT_ORIGIN_AGENT_NAME` | Agent display name. Used for private conversation provenance when no channel ID is set; adds a `buzz-origin-agent` tag instead. |
+
+When both variables are set, the channel ID takes precedence and the agent name is ignored.
+
+<Tip>
+In a git hook that runs `buzz messages send`, set `BUZZ_GIT_ORIGIN_CHANNEL_ID` to the UUID of the repository's associated channel. This links the message back to the channel automatically, enabling the relay to display proper thread context.
+</Tip>

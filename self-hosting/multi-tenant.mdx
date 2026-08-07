@@ -1,0 +1,176 @@
+---
+title: "Multi-Tenant Relay: Community Isolation in Buzz"
+sidebarTitle: "Multi-Tenant"
+description: "How Buzz isolates multiple communities on one shared Postgres instance using formal non-interference proofs, host-based routing, and community-scoped row labeling."
+---
+
+A multi-tenant Buzz deployment runs **N stateless relay processes** sharing a single Postgres instance that hosts **M independent communities**. Each community is a fully isolated workspace: its own channel namespace, membership table, signing keypair, token namespace, workflows, and audit chain. Communities share infrastructure as an implementation detail — it is never visible to any community member.
+
+## The Community Abstraction
+
+In Buzz, a **community** is the tenant-visible workspace selected by the request host. The URL you connect to is authoritative: `resolve_host(connection.host) → community_id` is established before AUTH, EVENT, REQ, REST, media, Git, search, workflow, or pub/sub handling. This is the same semantic as today's single-relay behavior — "the relay URL is the workspace" — lifted one level to support multiple communities per infrastructure deployment.
+
+```
+myproject.com     ──▶  community A  (channels, members, audit chain A)
+team.example.com  ──▶  community B  (channels, members, audit chain B)
+     │
+     └─── both served by the same relay processes + Postgres + Redis
+```
+
+A community is a durable row in a `communities` table. Creating one is an `INSERT`, never DDL. Every tenant-scoped row — events, channels, channel members, tokens, workflows, audit entries — carries a `community_id` column set by the server-side resolver at write time.
+
+## What Each Community Owns
+
+Each community has its own:
+
+- **Channel namespace** — channel IDs are stamped with the community at creation and the stamp is immutable thereafter
+- **Membership relation** — admission, roles, and revocation are community-scoped
+- **Signing keypair** — NIP-29 group events are signed per community; compromise of one key does not affect another
+- **Token namespace** — API tokens and NIP-98 grant tokens carry a community stamp; a token valid in community A never authorizes in community B
+- **Workflow definitions and runs** — triggers evaluate against in-community events only
+- **Audit hash chain** — N independent chains, one per community; tampering A's chain does not touch B's
+
+## Host-Based Resolution
+
+The relay resolves the community from the **connection host** — not from any client-supplied tag. Two resolution paths compose:
+
+| Event type | Resolution |
+|-----------|-----------|
+| **Channel-bearing** (has `#h` tag) | `resolve(channel_id) → community_id`; the connection host must agree with the resolved community |
+| **Channel-less** (profiles, DMs, lists — no `#h` tag) | `resolve_host(connection.host) → community_id` |
+
+The `h` tag on a wire event is a routing hint asserted by the client — it is never the commit point of tenancy. If a client supplies an `h` tag pointing to a channel that belongs to a different community than the connection's host, the request is rejected fail-closed (`auth-required` / `restricted`), never acted on as the wrong community.
+
+An unmapped host (`resolve_host` returns `⊥`) rejects generically and never falls through to a default tenant.
+
+<Note>
+  This isolation model is formally verified. The TLA+ specification (`docs/spec/MultiTenantRelay.tla`) proves non-interference across all isolation properties via exhaustive model checking (472 million states generated, zero violations). The Tamarin specification (`docs/spec/MultiTenantAuth.spthy`) proves authorization soundness under a full Dolev-Yao adversary — all 32 lemmas verify green in ~12 seconds.
+</Note>
+
+## Isolation Properties
+
+Buzz states tenant isolation as **non-interference** (Goguen–Meseguer 1982): for any two executions equal on community B's inputs and initial B-visible state, B's observable outputs are equal regardless of community-A-only actions.
+
+The following isolation theorems are machine-verified:
+
+<Accordion title="I1 — Read confinement">
+  Every row a `Serve` operation returns — including direct-id and `#e`/`#a` lookups — is `ctx.community`-labeled. A B-scoped connection cannot receive A-labeled rows regardless of filter contents.
+</Accordion>
+
+<Accordion title="I2 — Resolution fence (h-tag cannot escape)">
+  `ctx.community` is always `resolve(channel_id)` or `resolve_host(host)`, never the `h` tag, the claimed community, or the token stamp. An adversary setting `h = community_A` over a community-B connection cannot widen what is served or accepted.
+</Accordion>
+
+<Accordion title="I3 — Write non-loss and no cross-contamination">
+  Every accepted append commits under the resolved label and no other. Two communities appending the same event ID land as two separate rows under distinct labels — a cross-community ID collision is not a write conflict (the uniqueness constraint is composite over `(community_id, ..., id)`).
+</Accordion>
+
+<Accordion title="I4 — Fail-closed RLS backstop">
+  If the application predicate is dropped, Postgres RLS yields empty results — never all-tenant rows. RLS is the load-bearing backstop, not decoration.
+</Accordion>
+
+<Accordion title="I5 — Admission fence">
+  Channel membership and channel-less read capability exist only for actors admitted to *that* community. An actor admitted to community A cannot join community B's channels or read community B's no-`#h` feed.
+</Accordion>
+
+### Authorization Soundness (Tamarin)
+
+The Tamarin model proves eight authorization properties under a Dolev-Yao adversary:
+
+| Theorem | What it guarantees |
+|---------|--------------------|
+| **S1** Token confinement | A token stamped for community A never authorizes in community B |
+| **S2** Mint integrity | A token exists only if minted by the holder of the owner key; a cross-community mint yields no token |
+| **S3** Signing-key non-confusion | Community B's key cannot forge community A events, even when group IDs collide |
+| **S4** Audit-chain unforgeability | Compromise of B's chain key does not break A's chain |
+| **S5** Channel-less host confinement | A channel-less op is confined to the host-resolved community; a B-stamped token over an A-host never authorizes for B |
+| **S6** Channel-bearing host/channel agreement | A channel-bearing op is confined to the community bound to the connection host |
+| **S7** NIP-43 admission confinement | B's signing key cannot admit a pubkey into A |
+| **S8** Open-community AUTH confinement | Open-community auto-registration commits to the host-resolved community, never a client-claimed one |
+
+Run the proofs yourself:
+
+```bash
+# TLA+ isolation model
+java -cp tla2tools.jar tlc2.TLC \
+  -config docs/spec/MultiTenantRelay.cfg \
+  docs/spec/MultiTenantRelay.tla
+
+# Tamarin authorization model (~12s, 32 lemmas)
+tamarin-prover --prove docs/spec/MultiTenantAuth.spthy
+```
+
+## Today's Model vs. Target Architecture
+
+| Aspect | Today (single-community) | Target (multi-community) |
+|--------|--------------------------|--------------------------|
+| Security boundary | Relay process | Community (`community_id` discriminator + Postgres RLS) |
+| Channel locality | `channel_id` (`h` tag) only | `(community_id, channel_id)` — host-derived |
+| Signing key | One relay keypair | Per-community keypair |
+| Audit chain | One global chain | N independent per-community chains |
+| Redis key prefix | `buzz:channel:{uuid}` | `buzz:{community}:channel:{uuid}` |
+| Membership | Relay-global table | `(community_id, pubkey)` keyed table |
+
+The relay today is already built around the `TenantContext` abstraction — the single-community deployment is the degenerate case where `resolve_host` maps the one configured host to the one implicit community.
+
+## Subdomain Routing Example
+
+Each community is addressed by hostname. Configure DNS and your ingress/reverse proxy to route subdomains to the shared relay cluster:
+
+```yaml
+# Kubernetes Ingress (example)
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: buzz-communities
+spec:
+  rules:
+    - host: myproject.com
+      http:
+        paths:
+          - path: /
+            backend:
+              service:
+                name: buzz-relay
+                port:
+                  number: 3000
+    - host: team.example.com
+      http:
+        paths:
+          - path: /
+            backend:
+              service:
+                name: buzz-relay
+                port:
+                  number: 3000
+```
+
+The relay resolves the community from `Host:` header at the start of every connection — no per-community relay configuration is needed.
+
+## Guest and Scoped Tokens
+
+A NIP-98 API token carries exactly one community stamp, assigned at mint from the resolved channel set. A mint whose channel set spans two communities is rejected fail-closed — you cannot create a token that crosses community boundaries.
+
+For controlled cross-community access, use **guest tokens**: a token scoped to a specific channel set within one community, granting read or write access to that community's channels without full membership. The token's community stamp is the sole authorization boundary — a leaked token can act within its stamped community (blast radius is bounded) but never in another.
+
+## Open vs. Allowlisted Communities
+
+| Mode | Behavior |
+|------|----------|
+| **Open** | Any authenticated npub auto-registers on AUTH. Registration is stamped to the **host-resolved** community — "open" widens *who* may join, not *which* community they join. |
+| **Allowlisted** | Admits actors only via a signed NIP-43 member list signed by the community's keypair. B's signing key cannot admit pubkeys into A (Theorem S7). |
+
+Set `BUZZ_PUBKEY_ALLOWLIST=true` to activate allowlist mode for a community.
+
+## Logical Channel Isolation
+
+Beyond row-level isolation, Buzz closes every logical observation channel that could leak cross-community information:
+
+| Channel | Closure mechanism |
+|---------|------------------|
+| Event-id existence oracle (`ON CONFLICT DO NOTHING`) | Uniqueness constraint is composite over `(community_id, ..., id)` — a B-write at an id A holds gets a fresh key, not a conflict |
+| Constraint-violation error surface | Fixed sanitized error alphabet `Σ_err`; no raw DB errors reach tenant connections |
+| Projection rebuild path | Rebuild writes server-side projection tables only; never serves rows to tenant connections during rebuild |
+| NIP-11 unauthenticated surface | `RelayInfo::build` consumes only relay-static configuration — no DB handle, no tenant context |
+
+Physical channels (buffer cache, planner statistics, connection pool tail latency) are declared out-of-scope: they are bandwidth-bounded timing channels, orthogonal to the cross-tenant data leak, privilege escalation, and audit forgery threat model. Buzz does not claim timing non-interference.

@@ -1,0 +1,218 @@
+---
+title: "Remote Agents: Running Agents on External Substrates"
+sidebarTitle: "Remote Agents"
+description: "How Buzz Desktop delegates agent execution to remote compute via provider binaries, covering the provider protocol, lifecycle model, and Kubernetes binding."
+---
+
+Remote agents let Buzz Desktop run a managed agent on any compute substrate — a Kubernetes cluster, a cloud VM, a Blox workstation — without keeping a local process alive. The desktop handles identity and configuration; a **provider binary** handles deployment; and the **relay** is the only channel between the desktop and the running agent. This document covers the protocol, the lifecycle contract, and the first conforming implementation (`buzz-backend-kubernetes`).
+
+## System model
+
+Five principals interact in a remote agent deployment:
+
+| Principal | Role |
+|---|---|
+| **Desktop D** | Holds the agent's identity (nsec in the OS keyring) and the only UI. Trusted. |
+| **Provider P** | An executable `buzz-backend-<id>` on D's machine. Invoked one process per operation: JSON request on stdin, JSON response on stdout. **Untrusted** by D for everything except the job it is given. |
+| **Substrate S** | The remote compute environment (e.g. a Kubernetes cluster). Opaque to D. |
+| **Agent A** | A `buzz-acp` harness process running on S, connected to the relay. |
+| **Relay R** | The Buzz relay — the **only** channel that connects D to a running A. |
+
+The defining design axiom:
+
+> **(M1) No management channel.** After a successful deploy, D holds no persistent management session to A on S. Status is relay presence (`kind:20001`); stop is a relay message (`!shutdown`); there is no substrate status query, exec, log fetch, or kill in the protocol.
+
+## Five invariants
+
+The protocol maintains these invariants across all substrates and providers:
+
+<Accordion title="I1 — Identity fail-closed">
+No agent is ever launched with an empty or missing private key. Whatever assembles the harness environment MUST refuse rather than launch an identityless process. In the provider path, payload construction refuses if keyring hydration left the nsec empty.
+</Accordion>
+
+<Accordion title="I2 — No secrets in configuration">
+`provider_config` — the persisted, UI-visible settings object — MUST NOT carry secrets. Enforced by validation: flat object, scalar values only, ≤ 20 fields, ≤ 64 KB. Any key whose word-split contains `secret | password | token | key | credential` is rejected. Secrets flow exclusively inside the deploy payload (`private_key_nsec`, `auth_tag`, `env_vars`), which is never persisted by D.
+</Accordion>
+
+<Accordion title="I3 — Presence is the status">
+D derives a remote agent's live state exclusively from relay presence events self-signed by the agent key: `online` / `away` / `offline` (kind:20001, ephemeral, WS-published). The staleness window is bounded at **180 seconds** — the relay's presence TTL. This is the accepted cost of M1.
+</Accordion>
+
+<Accordion title="I4 — At most one live instance per agent key per deployment scope">
+Within one provider's deployment scope (for Kubernetes: one namespace), there is never more than one Running instance of a given agent pubkey. Deploy is a reconciliation loop: live and started → strict no-op; terminated → replace; never-started and provably broken → replace; never-started and recoverable → observe.
+</Accordion>
+
+<Accordion title="I5 — Intentional termination is final">
+A remote agent stops when told and is never silently resurrected. Supervisor restart policy MAY revive an abnormal death (node eviction, OOM) and MUST NOT revive an intentional clean exit (owner `!shutdown`, inactivity reap). An `always-restart` policy is non-conforming at every layer.
+</Accordion>
+
+## Provider protocol
+
+### Discovery
+
+The desktop scans (in order) the directory containing the desktop executable, every entry of `PATH`, and `~/.local/bin` for executables named `buzz-backend-<id>`. The suffix after the prefix is the provider id and must match `[a-z0-9][a-z0-9_-]*`. First hit per filename wins. Discovery executes nothing.
+
+### Invocation
+
+One process per operation. D spawns P, writes exactly one JSON object to stdin, closes stdin. P writes exactly one JSON object to stdout and exits. Non-zero exit is failure regardless of stdout content.
+
+### `info` operation
+
+```json
+// Request
+{"op": "info", "request_id": "<uuid>"}
+
+// Response
+{
+  "ok": true,
+  "name": "Kubernetes",
+  "version": "0.1.0",
+  "protocol_version": 1,
+  "description": "Deploy agents to a Kubernetes cluster",
+  "config_schema": { /* JSON Schema — drives the Desktop UI form */ }
+}
+```
+
+Timeout: 10 seconds. A missing `protocol_version` is an error (not assumed to be `1`).
+
+### `deploy` operation
+
+```json
+// Request
+{
+  "op": "deploy",
+  "request_id": "<uuid>",
+  "agent": {
+    "name": "my-agent",
+    "relay_url": "wss://relay.example.com",
+    "private_key_nsec": "nsec1...",
+    "auth_tag": "[\"auth\",\"<owner>\",\"\",\"<sig>\"]",
+    "agent_command": "goose",
+    "agent_args": ["acp"],
+    "system_prompt": "...",
+    "model": "gpt-4o",
+    "respond_to": "owner-only",
+    "env_vars": {},
+    "launch": {
+      "command": "goose",
+      "args": ["acp"],
+      "env": {},
+      "policy_env": {},
+      "owner_pubkey": "<hex>"
+    }
+  },
+  "provider_config": {"namespace": "buzz-agents-abc123", "context": "my-cluster"}
+}
+
+// Response
+{"ok": true, "agent_id": "buzz-agent-a1b2c3d4e5f6"}
+```
+
+Timeout: 600 seconds. `agent_id` is P's stable handle for the deployment (e.g. the Kubernetes pod name). D stores it as `backend_agent_id`.
+
+<Warning>
+A provider binary receives the agent's private key (`private_key_nsec`) by design — that is its job. The provider protocol **bounds the desktop's exposure** (discovery-only resolution, output caps, secret redaction, anti-secret config validation, explicit UI trust warning) but cannot make a hostile provider safe. Choosing to install and run a provider binary is a trust decision.
+</Warning>
+
+### Deploy state machine
+
+`deploy` is not "create" — it is *converge to at-most-one-live-instance*. The provider evaluates these ordered rows on each reconciliation pass:
+
+| Observed state | Action |
+|---|---|
+| Instance marked for deletion (`deletionTimestamp` set) | Wait for actual disappearance, then re-enter |
+| No instance | Create, then verify startup (harness container actually running) |
+| Terminated (Succeeded / Failed) | Delete residue, wait, re-enter (normal restart path) |
+| Live and **started** (harness container running) | **Strict no-op** — never kill a live agent mid-turn |
+| Never started, provably non-recoverable | Delete (preconditioned), re-enter |
+| Never started, recoverable, same create-intent | Observe until started or deadline — **never delete** |
+| Never started, recoverable, divergent intent | Delete, re-enter (edit takes effect) |
+
+`deploy` succeeds only when the harness container has actually started, bounded by the 600-second operation deadline.
+
+### Stop and delete
+
+- **Stop** is not a provider operation. D publishes `!shutdown` mentioning the agent on the relay. The harness verifies the sender is the owner, drains in-flight turns, publishes presence `offline`, and exits cleanly.
+- **Delete** with a live `backend_agent_id` requires an explicit `force_remote_delete` confirmation from the UI.
+
+### Auto-stop (inactivity self-termination)
+
+```bash
+BUZZ_ACP_EXIT_AFTER_INACTIVITY=7200  # seconds; 0 = disabled
+```
+
+When set, the harness fires its graceful shutdown after the configured period of no dispatched events and no turns in flight. Raw relay traffic does not count — an agent lurking in a busy channel it never answers is still idle. The reaper runs on its own timer, independent of pool readiness, so a lazy-pool agent that never wakes still reaps itself.
+
+## The Kubernetes binding
+
+`buzz-backend-kubernetes` is the first conforming provider. It is a Rust binary distributed as a standalone release artifact.
+
+### Cluster auth
+
+Standard kubeconfig resolution (`$KUBECONFIG` → `~/.kube/config`) via `kube-rs`. `provider_config` carries `context` and `namespace` only — never credentials (I2).
+
+### Image
+
+```
+ghcr.io/block/buzz-sprig@sha256:<pinned-digest>
+```
+
+Alpine base + `bash` + `git` + CA certificates + the static musl `sprig` multicall binary with personality links (`buzz-acp`, `buzz-agent`, `buzz-dev-mcp`, `rg`, `tree`, `buzz`, `git-credential-nostr`, `git-sign-nostr`) + a baked system gitconfig wiring the Nostr signing and credential helpers. ~15–25 MB.
+
+The default image reference is **pinned by digest** at compile time. A tag would be a mutable pointer; Kubernetes distinguishes movable tags from immutable digests for exactly this reason, and the container holds an nsec.
+
+User `image` overrides accept tag, digest, or a full custom registry reference. A custom image MUST include the `buzz-acp` runtime ABI — it is "buzz-sprig plus your tools", not "your tools instead".
+
+### Pod shape
+
+```
+restartPolicy: Never       # bounded-lifetime agents (inactivity_seconds > 0)
+restartPolicy: OnFailure   # indefinite agents (inactivity_seconds: 0)
+terminationGracePeriodSeconds: 60
+automountServiceAccountToken: false
+runAsNonRoot: true
+allowPrivilegeEscalation: false
+```
+
+Resources default: requests 1 cpu / 2 Gi, limits 2 cpu / 4 Gi. All four are configurable — `cargo build` in an agent workspace makes 500 m / 1 Gi requests unrealistic.
+
+### Naming
+
+| Object | Name pattern |
+|---|---|
+| Pod | `buzz-agent-<first-12-hex-of-pubkey>` |
+| Secret | `buzz-agent-<first-12-hex>-<generation-token>` |
+| Pubkey label | `buzz.block.xyz/agent-pubkey: <first-32-hex>` |
+| Full-pubkey annotation | `buzz.block.xyz/agent-pubkey-full: <full-64-hex>` |
+| Create-intent fingerprint | `buzz.block.xyz/create-intent: <sha256-of-intent-template>` |
+| Management marker | `app.kubernetes.io/managed-by: buzz-backend-kubernetes` |
+
+### `provider_config` fields (v1)
+
+`context`, `namespace`, `image`, `cpu_request`, `memory_request`, `cpu_limit`, `memory_limit`, `inactivity_seconds` (schema default 7200), `service_account` — 9 of the 20-field validation cap.
+
+## Conformance layers
+
+Obligations are split by layer:
+
+**[L1] Every launcher** (bash script, systemd unit, Desktop, provider-deployed pod):
+- Launch with a valid, non-empty identity (keypair + relay URL + owner pubkey or auth tag).
+- Never set `BUZZ_ACP_NO_PRESENCE` remotely — presence is the only signal under M1.
+- Ensure the substrate's termination signal reaches the harness process with enough grace time for graceful shutdown.
+- Never configure `always-restart` supervisor policy.
+
+**[L2] Every provider**:
+- Implement the `info` / `deploy` wire contract (one JSON in, one JSON out, in-band `{"ok": false}` errors).
+- Never put credentials in `provider_config`.
+- Build agent identity env from top-level payload fields, not from `env_vars`.
+- Implement the reconciliation loop with full-identity annotation checks, started-not-phase as the no-op criterion, and compare-and-delete for all destructive writes.
+
+**[L3] Kubernetes binding**:
+- Use container `state.running` for "started", `resourceVersion`-unset quorum reads for most-recent semantics, `Status.reason` (not the HTTP status code) to discriminate 409 conflicts, and the management marker label as the auto-repair fence.
+
+## Non-goals
+
+- **Malicious-provider containment** — a provider binary receives the nsec by design; the protocol bounds the desktop's exposure but cannot make a hostile provider safe.
+- **Substrate security** — Kubernetes RBAC, namespace isolation, and secret encryption at rest are cluster-operator concerns.
+- **Agent conversational behavior** — what the agent does with events is governed by `buzz-acp` and the NIPs it implements, unchanged by where the harness runs.
+- **Liveness of the substrate** — that a pod schedules, that an image pulls, that a cluster is reachable — these are empirical, not formal properties.

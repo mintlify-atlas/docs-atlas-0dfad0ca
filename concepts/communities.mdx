@@ -1,0 +1,194 @@
+---
+title: "Buzz Communities: Tenant Boundaries and Workspace Isolation"
+sidebarTitle: "Communities"
+description: "A community is the top-level tenant boundary in Buzz — one URL, one isolated workspace. Learn how isolation is proven, not just asserted."
+---
+
+A **community** is the tenant boundary in Buzz: one workspace, one URL, one isolated world of channels, members, profiles, direct messages, repositories, and search. When you deploy Buzz at `myproject.com`, that domain *is* the community. Everything inside — every message, every channel, every agent job — belongs to that community and cannot be observed by any other.
+
+## The URL is the Community
+
+Buzz treats the relay URL/domain as authoritative for the community. This is not a configuration option — it is enforced at the protocol level before any request handler runs.
+
+```
+req.community = resolve_host(connection.host)
+```
+
+This resolution happens at connection establishment, before `AUTH`, `EVENT`, `REQ`, REST, media, git, search, workflow, or pub/sub handling. An unknown or unmapped host is rejected fail-closed and never falls through to a default tenant. Client-supplied `#h` tags identify *channels* inside the host-resolved community; they never select or override which community a connection belongs to.
+
+<Note>
+The community resolver is defined in `crates/buzz-core/src/tenant.rs`. `TenantContext` has no `Default`, no `Deserialize`, and no way to be parsed from client input — there is no accidental path by which a client can claim a community.
+</Note>
+
+## What a Community Owns
+
+A community is a durable row in the `communities` table. Creating one is an `INSERT`, never DDL. It owns:
+
+<CardGroup cols={2}>
+  <Card title="Channels" icon="hash">
+    All stream, forum, DM, and workflow channels. A channel's `community_id` is set at creation and immutable — channels can never be re-tenanted.
+  </Card>
+  <Card title="Membership" icon="users">
+    The set of admitted pubkeys with their roles (`owner`, `admin`, `member`, `guest`, `bot`). Managed via NIP-43 admin events or the `buzz-admin` CLI.
+  </Card>
+  <Card title="Signing Keypair" icon="key">
+    In multi-community deployments, each community has its own signing keypair used for relay-signed events (group metadata, membership notifications, audit entries).
+  </Card>
+  <Card title="API Tokens" icon="ticket">
+    A scoped token namespace for programmatic and guest access. Tokens carry a community stamp; a token from community A is rejected if presented to community B.
+  </Card>
+  <Card title="Workflows" icon="bolt">
+    YAML-as-code automation definitions and execution records, scoped to the community. Triggers only evaluate events within the same community.
+  </Card>
+  <Card title="Audit Chain" icon="shield-check">
+    A per-community SHA-256 hash chain of audit entries. Tamper-evident and independently verifiable per community — one chain cannot corrupt another.
+  </Card>
+  <Card title="Messages" icon="message">
+    All stored Nostr events in the community-keyed append-only log. Channel-scoped events carry a `channel_id`; channel-less events (profiles, DMs, long-form) carry only the `community_id`.
+  </Card>
+  <Card title="Search Index" icon="magnifying-glass">
+    The Postgres full-text search index is shared infrastructure, but every query carries `community_id` — the FTS predicate is BitmapAnd-ed with community-leading btree filters. A search never crosses community boundaries.
+  </Card>
+</CardGroup>
+
+## Single-Community vs. Multi-Community
+
+<Tabs>
+  <Tab title="Single-Community (Default)">
+    The default self-hosted deployment: one host, one relay process, one implicit community. Every connection binds to that community automatically. No behavioral difference from operating without community concepts at all — the community level adds nothing observable at N=1.
+
+    ```bash
+    # Default startup — one community at localhost:3000
+    just relay &
+    ```
+
+    Redis keys use the simple unprefixed form:
+    - `buzz:channel:{uuid}` — event fan-out
+    - `buzz:presence:{pubkey_hex}` — presence TTL (180s)
+    - `buzz:typing:{channel_uuid}` — typing sorted set
+  </Tab>
+  <Tab title="Multi-Community">
+    Multiple communities share one Postgres instance, N stateless relay processes, and (optionally) one Redis. Each community is reachable by its own domain or subdomain. An operator creates a new workspace with a DB write and a DNS route — no new stack needed.
+
+    In multi-community mode, all tenant-visible Redis keys must be prefixed by community to prevent cross-tenant leakage:
+    - `buzz:{community}:channel:{uuid}`
+    - `buzz:{community}:presence:{pubkey_hex}`
+    - `buzz:{community}:typing:{channel_uuid}`
+
+    Unknown hosts are rejected generically — they never fall back to a neighbor's community.
+  </Tab>
+</Tabs>
+
+## Access Model
+
+The relay enforces all access control. Channel membership is the only gate.
+
+| Type | Visibility | Join | Who Can Create |
+|------|-----------|------|----------------|
+| **Open channels** | Searchable by all community members | Self-join (`kind:9021`) | Any member |
+| **Private channels** | Hidden, invite-only | Invited by owner/admin only | Any member |
+| **DMs** | Participants only | N/A (up to 9 participants) | Any member |
+| **Guests** | Scoped to specific channels | Invited | N/A |
+
+### Pubkey Allowlist
+
+When `BUZZ_PUBKEY_ALLOWLIST=true`, NIP-42 connections that authenticate with only a pubkey (no API token) are checked against the `pubkey_allowlist` table. This lets you accept specific external Nostr identities without opening the relay to everyone.
+
+```bash
+export BUZZ_PUBKEY_ALLOWLIST=true
+just relay &
+
+# Add a pubkey to the allowlist (direct SQL — no CLI command yet)
+PGPASSWORD=buzz_dev psql -h localhost -U buzz -d buzz -c \
+  "INSERT INTO pubkey_allowlist (pubkey) VALUES (decode('<64-char-hex-pubkey>', 'hex'))"
+```
+
+<Warning>
+The allowlist is fail-closed: if the database lookup fails, the connection is denied. API token holders bypass the allowlist entirely.
+</Warning>
+
+### API Tokens and Guest Access
+
+API tokens let guests, investors, partners, or automated systems access specific channels without a Nostr keypair. A token carries a community stamp and an explicit set of channel claims and scopes. Token hash lookup, channel claims, scopes, and revocation are all evaluated under `(community_id, token_hash)`.
+
+## Identity: Portable Keys, Per-Community Profiles
+
+Your Nostr keypair is yours across every community you join. Your public key is the same on every relay. What is *not* shared:
+
+- **Profiles** — a `kind:0` profile event is channel-less content stored under the community it was submitted to. You can publish the same profile to multiple communities, but profiles do not inherit across community domains.
+- **DMs** — NIP-17 gift-wrap DMs (`kind:1059`) are stored community-globally within the connected community (`channel_id = NULL`). They do not cross communities.
+- **Channel memberships** — membership in community A's channels says nothing about community B.
+
+<Tip>
+This is the portable-identity / per-community-profile model. Your keypair is self-sovereign and travels with you. What you do within a community stays within that community.
+</Tip>
+
+## Formal Isolation Proof
+
+Community isolation in Buzz is **proven, not just asserted**. The `docs/multi-tenant-relay.md` specification mechanizes isolation in two complementary frameworks:
+
+<Accordion title="TLA+ — Concurrency and Isolation">
+The TLA+ model encodes tenant isolation as a **label-flow invariant**: every state element (message row, membership, projection cell, in-flight query, emitted error, audit entry) carries the community label it originated from. The single-run safety invariant is that no high-labeled value ever flows into a low-labeled observation.
+
+Five isolation theorems are mechanized and mutation-tested non-vacuous:
+
+| Theorem | Guarantee |
+|---------|-----------|
+| **NI** (master) | Non-interference: B-scoped observations are functions only of B-labeled state |
+| **I1** Read confinement | Every row a `Serve` returns is `ctx.community`-labeled |
+| **I2** Resolution fence | The `h` tag never selects the community — only the host does |
+| **I3** Write non-loss | Accepted appends commit under the resolved label and no other |
+| **I4** Fail-closed backstop | A dropped application predicate yields ∅ under RLS, not all rows |
+| **I5** Admission fence | Membership and channel-less read capability exist only for admitted actors |
+</Accordion>
+
+<Accordion title="Tamarin — Authorization Soundness (Dolev-Yao Adversary)">
+The Tamarin model proves authorization soundness under a full Dolev-Yao adversary — an attacker who controls the network and can intercept, replay, and forge messages freely.
+
+Key theorems:
+
+| Theorem | Guarantee |
+|---------|-----------|
+| **S1** Token confinement | A token stamped for community A never authorizes in community B |
+| **S2** Mint integrity | A token only exists as output of a NIP-98 mint by the holder of `owner_pubkey` |
+| **S3** Signing-key non-confusion | A community-B-signed system event is never accepted as community A's |
+| **S4** Audit chain integrity | Per-community chains are independently verifiable; compromising A's key doesn't affect B |
+| **S7** NIP-43 admission confinement | B's signing key can never admit a pubkey into A |
+</Accordion>
+
+<Accordion title="Mutation Testing">
+Every TLA+ invariant and every Tamarin lemma is mutation-tested to confirm it is non-vacuous. Key mutations that are confirmed to go red:
+
+- **M3** — Replacing the composite `(community_id, id)` uniqueness constraint with a global `UNIQUE (id)` breaks the existence-oracle closure (I1/C2.1).
+- **M9** — Replacing `IsAdmitted(community, actor)` with `AdmittedInAnyCommunity(actor)` breaks the admission fence (I5), allowing an actor admitted in A to act in B.
+- **M10–M13** — Mutations to the open-community auth, channel-create stamp, feed-read gate, and aux-read gate each go red on their respective traces.
+</Accordion>
+
+## Relay Membership (NIP-43)
+
+When `BUZZ_REQUIRE_RELAY_MEMBERSHIP=true`, every authenticated connection is checked against the `relay_members` table for the host-resolved community.
+
+```bash
+# Manage relay membership via buzz-admin
+./run.sh add-member npub1abc...
+./run.sh add-member npub1abc... --role admin
+./run.sh remove-member npub1abc...
+./run.sh list-members
+
+# Or via WebSocket (NIP-43 admin events — owner/admin only)
+nak event -k 9030 \
+  --tag "p=<target-hex-pubkey>" \
+  --tag "role=member" \
+  --auth --sec <owner-privkey> \
+  ws://localhost:3000
+```
+
+After each membership change the relay publishes a `kind:13534` membership list snapshot (relay-signed, NIP-70 protected). Clients subscribe to it for live roster updates:
+
+```bash
+nak req -k 13534 --auth --sec <privkey> ws://localhost:3000
+```
+
+<Note>
+The relay owner is bootstrapped automatically from `RELAY_OWNER_PUBKEY` on startup. Use `buzz-admin generate-key` to generate a keypair for bootstrapping.
+</Note>

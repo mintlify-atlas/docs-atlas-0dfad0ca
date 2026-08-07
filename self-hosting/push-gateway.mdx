@@ -1,0 +1,293 @@
+---
+title: "Buzz Push Gateway: APNs Deployment and Operations"
+sidebarTitle: "Push Gateway"
+description: "Deploy and operate buzz-push-gateway, the standalone APNs last-hop for iOS push notifications. Covers ports, secrets, Helm, Prometheus metrics, and key rotation."
+---
+
+`buzz-push-gateway` is the standalone Apple Push Notification service (APNs) last-hop intended for `push.buzz.xyz`. It is a separate binary and Docker image from the relay — build it with `Dockerfile.push-gateway`. Never run it inside the relay image or give relay processes APNs credentials. The gateway handles client enrollment, capability delegation, and final APNs delivery; relays retain lease matching, authorization, coalescing, and durable retry, but never see raw device tokens or provider keys.
+
+## Network and Health
+
+The gateway listens on two ports:
+
+| Port | Purpose | Exposure |
+|------|---------|---------|
+| `8080` | Public delivery endpoint | Route `https://push.buzz.xyz` (or your domain) here |
+| `8081` | Private health probes + Prometheus metrics | **Never expose publicly** |
+
+Health endpoints on `8081`:
+- `/_liveness` — process alive
+- `/_readiness` — PostgreSQL authority store reachable (fails when DB is unavailable)
+
+Readiness fails when the PostgreSQL authority store is unavailable. Graceful shutdown stops accepting new requests before draining in-flight APNs calls.
+
+<Note>
+  Prometheus metrics are served at `GET /metrics` on port **8081** only — the same port as the health probes, never on the public `8080`. All metric label values are drawn from closed sets (fixed APNs outcome classes, static admission results, static error codes). No endpoint URL, device token, relay pubkey, request ID, or any request-scoped identifier is ever used as a label.
+</Note>
+
+## Required Environment Variables
+
+All 14 required variables must be set for the gateway to start. Readiness rejects a partial or misconfigured schema.
+
+### Database
+
+<ParamField query="DATABASE_URL" type="string" required>
+  PostgreSQL connection string for the gateway's dedicated authority/admission store. The runtime credential needs DML (`SELECT, INSERT, UPDATE, DELETE`) on the six `push_gateway_*` tables only — not DDL.
+
+  ```env
+  DATABASE_URL=postgres://buzz_push_gateway_runtime:pass@db.internal:5432/buzz_push_gateway
+  ```
+</ParamField>
+
+### APNs Provider Credentials
+
+<ParamField query="BUZZ_PUSH_APNS_KEY_PATH" type="string" required>
+  Filesystem path to a read-only mounted Apple APNs `.p8` provider key file. Mount from a secret manager — never bake into the image.
+</ParamField>
+
+<ParamField query="BUZZ_PUSH_APNS_KEY_ID" type="string" required>
+  APNs provider key ID (10-character string from Apple Developer portal).
+</ParamField>
+
+<ParamField query="BUZZ_PUSH_APNS_TEAM_ID" type="string" required>
+  Apple developer team ID (10-character string).
+</ParamField>
+
+<ParamField query="BUZZ_PUSH_APNS_TOPIC" type="string" required>
+  Buzz iOS bundle ID used as the APNs topic (e.g. `xyz.buzz.ios`).
+</ParamField>
+
+### App Attest
+
+<ParamField query="BUZZ_PUSH_APP_ATTEST_APP_ID" type="string" required>
+  Exact Apple App Attest application identifier in `TEAMID.bundle-id` format (e.g. `EXAMPLETEAM.xyz.buzz`). Must match exactly — the gateway rejects any mismatch.
+</ParamField>
+
+<ParamField query="BUZZ_PUSH_APP_ATTEST_ROOT_CERT_PATH" type="string" required>
+  Filesystem path to a read-only mounted Apple App Attest root certificate PEM. The gateway pins this certificate by SHA-256 fingerprint at startup and rejects any byte mismatch.
+
+  Accepted artifact: **Apple App Attestation Root CA** from `https://www.apple.com/certificateauthority/Apple_App_Attestation_Root_CA.pem`
+
+  - Certificate SHA-256: `1C:B9:82:3B:A2:8B:A6:AD:2D:33:A0:06:94:1D:E2:AE:4F:51:3E:F1:D4:E8:31:B9:F7:E0:FA:7B:62:42:C9:32`
+  - PEM file SHA-256: `c778d09ac341f7fd9f8f3b19e2b815af6aed4ad4490e1e92c05cb355212a5013`
+</ParamField>
+
+### AEAD Keyring
+
+<ParamField query="BUZZ_PUSH_GRANT_KEYS" type="string" required>
+  AEAD keyring for capability grant tokens. Format: `id:base64-32-bytes[,predecessor-id:base64-32-bytes,...]`. Current key must be first; retain decrypt-only predecessors until all capabilities encrypted under them have expired.
+
+  ```env
+  BUZZ_PUSH_GRANT_KEYS=v1:base64encodedkey32bytes==
+  ```
+</ParamField>
+
+<ParamField query="BUZZ_PUSH_TOKEN_KEYS" type="string" required>
+  Independent AEAD keyring for device token custody. Same format as `BUZZ_PUSH_GRANT_KEYS`. **Never reuse grant key IDs or key bytes for token keys** — the two keyrings are cryptographically independent by design.
+</ParamField>
+
+### Delivery and Quota
+
+<ParamField query="BUZZ_PUSH_PUBLIC_DELIVERY_URL" type="string" required>
+  Exact externally signed delivery URL, normally `https://push.buzz.xyz/v1/deliveries/apns`. This URL is embedded in gateway-issued capability grants — it must be the URL relays actually call.
+</ParamField>
+
+<ParamField query="BUZZ_PUSH_MAX_GRANT_LIFETIME_SECONDS" type="integer" required>
+  Maximum delegation capability lifetime in seconds (`1..=31536000`, i.e. 1 second to 1 year).
+</ParamField>
+
+<ParamField query="BUZZ_PUSH_MAX_INSTALLATION_LIFETIME_SECONDS" type="integer" default="7776000">
+  Maximum encrypted-token installation lifetime (default 90 days, max one year). Clients must renew before expiry.
+</ParamField>
+
+<ParamField query="BUZZ_PUSH_ENABLED_PROFILES" type="string" required>
+  Comma-separated list of enabled APNs profiles. Valid values: `buzz-ios-production`, `buzz-ios-sandbox`. Both can be enabled simultaneously.
+
+  ```env
+  BUZZ_PUSH_ENABLED_PROFILES=buzz-ios-production
+  ```
+</ParamField>
+
+### Optional Quota Policy
+
+<ParamField query="BUZZ_PUSH_ENDPOINT_QUOTA_WINDOW_SECONDS" type="integer" default="10">
+  Quota window duration in seconds (`1..=86400`). Tune under load while retaining a hard ceiling.
+</ParamField>
+
+<ParamField query="BUZZ_PUSH_ENDPOINT_QUOTA_MAX_DELIVERIES" type="integer" default="10">
+  Maximum deliveries per endpoint per quota window (`1..=10000`). These are Buzz policy hypotheses, not Apple-published limits.
+</ParamField>
+
+## Relay Configuration
+
+Set `BUZZ_PUSH_GATEWAY_DELIVERY_URL` on **each relay** to point to your gateway:
+
+```env
+# On each buzz-relay instance
+BUZZ_PUSH_GATEWAY_DELIVERY_URL=https://push.buzz.xyz/v1/deliveries/apns
+```
+
+The default value is already `https://push.buzz.xyz/v1/deliveries/apns`. Override this when self-hosting the gateway. Set to an empty string to explicitly disable push:
+
+```env
+BUZZ_PUSH_GATEWAY_DELIVERY_URL=
+```
+
+When enabled, the relay advertises its host-scoped NIP-PL descriptor in NIP-11 and starts the matcher and delivery worker. The relay holds only opaque capabilities — never APNs tokens or provider credentials.
+
+## PostgreSQL: Dedicated Database Required
+
+<Warning>
+  The gateway database **must be a dedicated PostgreSQL database** — never share it with the relay database. SQLx stores its `_sqlx_migrations` migration history in `public`; sharing a database with the relay would collide with the relay's migration history and corrupt both schemas.
+</Warning>
+
+The gateway creates exactly six tables:
+
+| Table prefix | Purpose |
+|-------------|---------|
+| `push_gateway_challenges` | App Attest challenge/response state |
+| `push_gateway_installations` | Encrypted APNs token custody |
+| `push_gateway_delegations` | Capability grant records |
+| `push_gateway_replay_log` | NIP-98 replay admission |
+| `push_gateway_quota` | Per-endpoint delivery quota reservations |
+| `push_gateway_revocations` | Revoked capability grants |
+
+All replicas must share one PostgreSQL database. Delivery authority, replay admission, and endpoint quota reservation are transactional — increasing replica count does not multiply the abuse ceiling.
+
+The gateway runs a retention reaper at startup and every 5 minutes, sweeping expired challenges, replay rows, idle quota rows, expired delegations, and retention-eligible installations (including their encrypted device token ciphertext).
+
+## Helm Chart Deployment
+
+The gateway chart is at `deploy/charts/buzz-push-gateway`, published separately from the main relay chart:
+
+```bash
+# Add the OCI chart registry (if needed)
+helm install buzz-push-gateway \
+  oci://ghcr.io/block/buzz/charts/buzz-push-gateway \
+  --namespace buzz-push-gateway --create-namespace \
+  -f values-production.yaml
+```
+
+The chart runs a pre-install/pre-upgrade migration Job using `migration.existingSecret` (a DDL-capable `DATABASE_URL`). After migrations, it revokes DDL privileges from the runtime role and grants only `CONNECT`, schema `USAGE`, and DML on the six gateway tables. Helm waits for the migration hook before updating replicas — rolling deployments never race unconditional startup migration.
+
+**Key chart values:**
+
+```yaml
+replicaCount: 2
+
+existingSecret: buzz-push-gateway          # runtime DATABASE_URL + AEAD keys
+migration:
+  existingSecret: buzz-push-gateway-migrations  # DDL-capable DATABASE_URL
+  runtimeDatabaseRole: buzz_push_gateway_runtime
+
+publicDeliveryUrl: https://push.buzz.xyz/v1/deliveries/apns
+maxGrantLifetimeSeconds: 2592000
+enabledProfiles: buzz-ios-production
+appAttestAppId: TEAMID.xyz.buzz
+
+appAttestRoot:
+  secretName: buzz-push-gateway
+  secretKey: app-attest-root.pem
+apnsKey:
+  secretName: buzz-push-gateway
+  secretKey: apns-provider.p8
+
+networkPolicy:
+  enabled: true
+  apnsEgressCidrs: [0.0.0.0/0]
+  postgresEgressCidrs: [10.0.0.0/8]   # narrow to your DB network
+```
+
+For production, pin the exact image digest:
+
+```bash
+gh attestation verify \
+  oci://ghcr.io/block/buzz-push-gateway@sha256:<64-lowercase-hex> \
+  --owner block
+```
+
+Then set `image.digest: sha256:<verified-digest>` in your values.
+
+## Prometheus Metrics
+
+Seven named metrics are served at `GET /metrics` on port `8081`:
+
+| Metric | Type | Labels | Meaning |
+|--------|------|--------|---------|
+| `push_gateway_apns_deliveries_total` | counter | `outcome`: `accepted`, `invalid_endpoint`, `retry`, `refresh_credential`, `configuration_fault`, `permanent_request_fault` | Terminal APNs send outcomes |
+| `push_gateway_apns_delivery_seconds` | histogram | — | APNs send round-trip latency |
+| `push_gateway_apns_credential_refreshes_total` | counter | — | Provider JWT refreshed after APNs reported expiry |
+| `push_gateway_admissions_total` | counter | `result`: `admitted`, `rejected`, `unavailable` | Outcome at the delivery replay/quota fence |
+| `push_gateway_delivery_errors_total` | counter | `class` (static) | Selected delivery-handler exit classes: `invalid_grant`, `temporarily_unavailable`, `profile_mismatch`, `token_custody`, `finish_failed` |
+| `push_gateway_reaper_failures_total` | counter | — | Retention reaper sweep failures |
+| `push_gateway_readiness_failures_total` | counter | `cause`: `not_accepting`, `authority` | Readiness probe failures by cause |
+
+Enable scraping via the Helm chart:
+
+```yaml
+podMonitor:
+  enabled: true
+  interval: 30s
+
+networkPolicy:
+  monitoring:
+    enabled: true
+    namespaceSelector:
+      kubernetes.io/metadata.name: monitoring
+    podSelector:
+      app.kubernetes.io/name: prometheus
+```
+
+### PrometheusRule Alerts
+
+Enable the alerting rules:
+
+```yaml
+prometheusRule:
+  enabled: true
+  apnsRetryRatioThreshold: 0.25
+  apnsRetryMinSamples: 20
+```
+
+| Alert | Fires when | Severity | Operator action |
+|-------|-----------|---------|----------------|
+| `PushGatewayConfigurationFault` | Any `configuration_fault` outcomes for 10 min | critical | APNs provider token/topic is unhealthy. Check `.p8` key, `BUZZ_PUSH_APNS_KEY_ID`, `TEAM_ID`, and `TOPIC`. Nothing is delivering. |
+| `PushGatewayAdmissionUnavailable` | Any admission `unavailable` for 5 min | critical | PostgreSQL authority store unreachable. Check DB connectivity and `postgresEgressCidrs` NetworkPolicy. |
+| `PushGatewayReadinessAuthorityFailing` | Readiness `authority` failures for 5 min | warning | Replicas are being pulled from Service on DB failure. Fix DB health before capacity drops below the PodDisruptionBudget. |
+| `PushGatewayReaperFailing` | Reaper failed ≥ 2 times within 30 min | warning | Expired reservations aren't being swept. Check DB write availability. |
+| `PushGatewayHighApnsRetryRate` | Retryable fraction > threshold over 10 min window, held for 15 min | warning | APNs is throttling or degraded (429/500/503). Deliveries are delayed, not lost. |
+
+## Secret and Key Rotation
+
+Mount all secrets from a secret manager. Never place values in an image, manifest, log, or metrics label.
+
+**AEAD keyring rotation** (rolling, zero-downtime):
+
+<Steps>
+  <Step title="Add the new current key">
+    Prepend the new key to `BUZZ_PUSH_GRANT_KEYS` (and `BUZZ_PUSH_TOKEN_KEYS` if rotating both). The new key goes first; predecessors are retained for decryption:
+    ```env
+    BUZZ_PUSH_GRANT_KEYS=v2:newkeybase64==,v1:oldkeybase64==
+    ```
+  </Step>
+  <Step title="Update the secret and deploy">
+    Update your secret manager. Kubernetes does not restart pods when referenced Secret bytes change — issue an explicit rolling restart:
+    ```bash
+    kubectl rollout restart deployment/<release>-buzz-push-gateway
+    ```
+  </Step>
+  <Step title="Verify readiness before removing old key">
+    Wait for all pods to become ready and for the predecessor retention window to pass (all capabilities/tokens encrypted under the old key have expired or been re-encrypted).
+  </Step>
+  <Step title="Remove the predecessor key">
+    Remove the old key from the keyring, update the secret, and roll again.
+  </Step>
+</Steps>
+
+**App Attest root certificate** is pinned by SHA-256 fingerprint. Treat an Apple root CA rotation as a reviewed code/config rollout — not an unpinned mount replacement. The gateway rejects startup if the mounted PEM does not match the pinned fingerprint.
+
+**APNs `.p8` key rotation:** Replace the mounted key file and roll the deployment. The gateway refreshes the provider JWT automatically when APNs reports expiry (`refresh_credential` outcome).
+
+<Warning>
+  Database backups contain ciphertext APNs tokens plus authority metadata. They must receive the same access controls and retention treatment as the service secrets themselves.
+</Warning>

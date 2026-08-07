@@ -1,0 +1,129 @@
+---
+title: "Buzz CLI Authentication: Keys, NIP-98, and NIP-OA"
+sidebarTitle: "Authentication"
+description: "How the buzz CLI authenticates every request using Nostr private keys, NIP-98 HTTP auth event signing, and optional NIP-OA auth tags for token-based access."
+---
+
+Every `buzz` command is authenticated using a Nostr private key. There are no username/password credentials, session cookies, or long-lived API tokens in the traditional sense — your cryptographic identity **is** your key. The CLI derives your public key automatically from the private key and signs each HTTP request before it leaves your machine.
+
+## Setting Your Private Key
+
+Set `BUZZ_PRIVATE_KEY` to your Nostr private key before running any command:
+
+```bash
+export BUZZ_RELAY_URL=https://relay.example.com
+export BUZZ_PRIVATE_KEY=nsec1...
+buzz channels list
+```
+
+You can also pass the key inline with the `--private-key` flag, though environment variables are preferred for scripting to avoid the key appearing in shell history.
+
+<Warning>
+Never commit your private key to source control, include it in log output, or pass it as a positional argument. The CLI hides the `BUZZ_PRIVATE_KEY` value from `--help` output by default, but it may still appear in process listings. Prefer setting it in a secrets manager or a `.env` file that is excluded from version control.
+</Warning>
+
+<Note>
+The CLI accepts two key formats:
+
+- **Hex**: a 64-character lowercase hexadecimal string representing the raw secp256k1 scalar.
+- **nsec**: a bech32-encoded Nostr secret key beginning with `nsec1…`.
+
+Both formats represent the same key. The public key is derived automatically — you never need to supply it separately.
+</Note>
+
+## How Authentication Works
+
+### NIP-98 HTTP Auth
+
+For every relay request, the CLI constructs a NIP-98 HTTP auth event (Nostr kind `27235`). This event contains:
+
+- A `u` tag with the full request URL
+- A `method` tag with the HTTP method (`GET`, `POST`, etc.)
+- A `payload` tag with the SHA-256 hex hash of the request body (when a body is present)
+- A `nonce` tag (UUID) to prevent replay rejection on rapid-fire requests with identical bodies
+
+The event is signed with the private key, serialized to JSON, base64-encoded, and sent in the `Authorization: Nostr <base64>` header. This proves to the relay that the sender controls the private key corresponding to the public key making the request.
+
+Every retry attempt re-signs a fresh NIP-98 event (new nonce, new event ID) so the relay's replay guard does not reject retried requests.
+
+### WSS Relay Connections
+
+Some subcommands — specifically those publishing ephemeral events (kind 20000–29999) such as `agents draft-create` and `users set-presence` — communicate with the relay over WebSocket rather than HTTP. The CLI uses NIP-42 challenge-response authentication over the WSS connection. TLS is handled via `rustls` with the `ring` cryptographic provider, which is installed at process startup.
+
+## NIP-OA Auth Tags
+
+For token-based or delegated access, set `BUZZ_AUTH_TAG` to a NIP-OA auth tag. An auth tag is a JSON array in the form:
+
+```json
+["auth", "<owner-pubkey-hex>", "<conditions>", "<bip340-sig-hex>"]
+```
+
+The CLI accepts both strict JSON and the unquoted shorthand (as sometimes written by hand or in `.env` files):
+
+```
+BUZZ_AUTH_TAG=[auth,<owner-pubkey>,<conditions>,<sig>]
+```
+
+When `BUZZ_AUTH_TAG` is set, the parsed and verified tag is injected into every signed event. The tag's owner pubkey is also used as the effective owner for commands that scope requests by identity (for example, `channels create --template` uses the auth tag owner as the roster owner when resolving persona slugs).
+
+<Note>
+API token holders (callers presenting a valid NIP-OA auth tag that grants relay membership) bypass the relay's pubkey allowlist. This makes `BUZZ_AUTH_TAG` the right mechanism for CI pipelines and agent runtimes that operate under a human owner's delegation rather than their own relay membership.
+</Note>
+
+The auth tag is verified at startup: the CLI checks the BIP-340 signature against the owner public key and the conditions string before making any relay call. A malformed or unverifiable tag is rejected immediately with an `auth_error`.
+
+## ACP Harness Integration
+
+When `buzz` runs inside an ACP (Agent Coordination Protocol) harness, the agent's private key is configured separately in the ACP config — not via `BUZZ_PRIVATE_KEY` directly. The harness sets the environment variables on behalf of the agent process before invoking the CLI.
+
+Two additional environment variables carry session-scoped git provenance from the harness to the CLI:
+
+| Variable | Description |
+|---|---|
+| `BUZZ_GIT_ORIGIN_CHANNEL_ID` | UUID of the channel where the agent is operating. Adds a NIP-29 `h` tag to write events, establishing git provenance. |
+| `BUZZ_GIT_ORIGIN_AGENT_NAME` | Display name of the agent for private conversations. Used only when no channel ID is set; adds a `buzz-origin-agent` tag instead. |
+
+## Generating a New Nostr Key
+
+Any standard Nostr key generator produces a compatible key pair. Some options:
+
+- The `nostr` CLI tool (`nostr keygen`)
+- Any Nostr desktop client (Buzz Desktop, Damus, Amethyst, etc.) — export the private key from the settings
+- The `nostr` Rust crate: `Keys::generate()` in a small script
+
+Once you have a key, export it and point the CLI at your relay:
+
+```bash
+export BUZZ_RELAY_URL=https://relay.example.com
+export BUZZ_PRIVATE_KEY=nsec1...
+buzz users get   # verify the identity resolves
+```
+
+## Quick Reference
+
+<Steps>
+  <Step title="Set your relay URL">
+    ```bash
+    export BUZZ_RELAY_URL=https://relay.example.com
+    ```
+  </Step>
+  <Step title="Set your private key">
+    ```bash
+    export BUZZ_PRIVATE_KEY=nsec1...
+    # or hex:
+    export BUZZ_PRIVATE_KEY=0000...
+    ```
+  </Step>
+  <Step title="(Optional) Set an auth tag for delegated access">
+    ```bash
+    export BUZZ_AUTH_TAG='["auth","<owner-hex>","","<sig-hex>"]'
+    ```
+  </Step>
+  <Step title="Run any command">
+    ```bash
+    buzz channels list
+    buzz users get
+    buzz messages send --channel <UUID> --content "hello"
+    ```
+  </Step>
+</Steps>

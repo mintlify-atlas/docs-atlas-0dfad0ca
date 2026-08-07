@@ -1,0 +1,248 @@
+---
+title: "Buzz Desktop App: Installation and Development Guide"
+sidebarTitle: "Desktop App"
+description: "Set up, run, and build the Buzz desktop app — a Tauri 2 + React 19 native client with OS keyring security, agent management, and real-time media."
+---
+
+The Buzz desktop app is the primary human interface for a Buzz workspace. Built on Tauri 2 with a React 19 + TypeScript frontend, it connects to a local or remote `buzz-relay` over WebSocket and stores your private key securely in the OS keyring. Version 0.5.7 ships with agent management, drag-and-drop, an emoji picker, real-time video processing via MediaPipe, and rich Markdown editing via Tiptap.
+
+## Tech stack
+
+<CardGroup cols={2}>
+  <Card title="Shell" icon="window">
+    Tauri 2 (`buzz-desktop` crate, Rust 2021 edition). Sidecar binaries — `buzz-acp`, `buzz-agent`, `buzz-dev-mcp`, `git-credential-nostr`, `buzz-cli` — are bundled alongside the app executable.
+  </Card>
+  <Card title="Frontend" icon="react">
+    React 19 · TypeScript 6 · Vite 8 · TanStack Router v1 · TanStack Query v5 · Tailwind CSS v4 · Radix UI · Tiptap 3
+  </Card>
+  <Card title="UI extras" icon="palette">
+    dnd-kit (drag-and-drop), emoji-mart (emoji picker), Inter variable font, JetBrains Mono, Lucide icons, Shiki syntax highlighting, motion animations
+  </Card>
+  <Card title="Security" icon="lock">
+    Private keys stored in the OS keyring via the `keyring` crate (`system-keyring` feature, enabled by default). Falls back to `0o600` files only when the feature is disabled.
+  </Card>
+</CardGroup>
+
+## Prerequisites
+
+You'll need [Docker](https://docs.docker.com/get-docker/) (for Postgres + Redis in dev) and [Hermit](https://cashapp.github.io/hermit/) or the following toolchain versions manually installed:
+
+- Rust 1.88+
+- Node 24+
+- pnpm 10+
+- `just`
+
+## Development setup
+
+<Steps>
+  <Step title="Clone and activate the toolchain">
+    ```bash
+    git clone https://github.com/block/buzz.git && cd buzz
+    . ./bin/activate-hermit   # downloads pinned tools on first use
+    ```
+  </Step>
+
+  <Step title="Bootstrap the environment">
+    ```bash
+    just setup
+    ```
+
+    `just setup` runs `just bootstrap` automatically, which copies `.env.example` → `.env` if needed, verifies Docker is installed, and starts Postgres + Redis via Docker Compose. Database migrations and a local community seed are applied automatically.
+  </Step>
+
+  <Step title="Start the relay and desktop together">
+    ```bash
+    just dev
+    ```
+
+    This builds the Rust relay and all sidecar binaries, waits for the relay health endpoint to confirm readiness, then launches the Tauri dev app. The relay runs on `ws://localhost:3000`.
+
+    For split-terminal workflows (relay logs separate from Vite output):
+
+    ```bash
+    just relay         # terminal 1 — relay on :3000
+    just desktop-dev   # terminal 2 — Vite frontend
+    ```
+  </Step>
+
+  <Step title="(Optional) Desktop-only mode">
+    If you only want to work on the frontend without any local relay or Docker services:
+
+    ```bash
+    just desktop-standalone
+    ```
+
+    The app opens normally and prompts for a community URL before making any relay connection. No Postgres, Redis, or `.env` required.
+  </Step>
+</Steps>
+
+<Note>
+  **OS keyring security.** Your Nostr private key (`nsec`) is stored in the platform keyring — macOS Keychain, Windows Credential Manager, or the Linux Secret Service — via the Tauri keychain integration. It is never written to disk in plaintext. The dev keyring service is namespaced per worktree as `buzz-desktop-dev.<slug>` to keep multiple worktrees isolated.
+</Note>
+
+## Resetting dev state
+
+To start fresh — clearing WebView storage, relay data, and the dev keyring entry — pass the `fresh=1` flag:
+
+```bash
+just fresh=1 desktop-standalone
+```
+
+This sets `BUZZ_RESET_WEBVIEW_STATE=1` and calls `reset-desktop-standalone-state.sh` before launching, giving you a clean login screen without touching any installed production builds.
+
+## Mesh-LLM mode
+
+Shared compute features (mesh-LLM) are **off by default** to keep build times fast (~420 extra crates + the llama.cpp native runtime). To enable them:
+
+```bash
+just mesh=1 dev
+```
+
+This passes `--features mesh-llm` to `tauri dev` and downloads the native runtime cache automatically. Use `mesh=1` with any `just` target that launches the desktop: `dev`, `staging`, `production`, or `desktop-standalone`.
+
+## Building for release
+
+```bash
+# From the repo root (recommended, handles sidecar stubs automatically):
+just desktop-release-build aarch64-apple-darwin
+
+# Or directly from the desktop/ directory:
+cd desktop && pnpm tauri:build
+```
+
+Packaged installers are placed in `desktop/src-tauri/target/release/bundle/`. Supported targets:
+
+| Platform | File |
+|---|---|
+| macOS (Apple Silicon) | `Buzz_<version>_aarch64.dmg` |
+| macOS (Intel) | `Buzz_<version>_x64.dmg` |
+| Linux (x86_64) | `Buzz_<version>_amd64.AppImage` / `.deb` |
+| Windows (x64) | `Buzz_<version>_x64-setup_alpha-unsigned.exe` |
+
+<Note>
+  The Windows installer is unsigned. SmartScreen may show "Windows protected your PC" on first launch — click **More info → Run anyway** if available.
+</Note>
+
+## Testing
+
+### Unit tests
+
+```bash
+# Run all desktop TypeScript unit tests:
+cd desktop && pnpm test
+
+# Or via just:
+just desktop-test
+```
+
+The unit runner uses Node's built-in test runner with `--experimental-strip-types` to run `.test.mjs` files directly.
+
+### End-to-end tests (Playwright)
+
+```bash
+cd desktop && pnpm test:e2e
+```
+
+E2E tests build the frontend in `e2e` mode first, then run Playwright against the production build. There are two test projects:
+
+| Command | Project | What it tests |
+|---|---|---|
+| `pnpm test:e2e:smoke` | `smoke` | Fast UI smoke checks, no relay required |
+| `pnpm test:e2e:integration` | `integration` | Full relay-backed flows (requires migrations) |
+
+To seed deterministic channel data for integration tests:
+
+```bash
+just desktop-e2e-seed
+```
+
+To run only specs that changed relative to `origin/main` (faster pre-push check):
+
+```bash
+just desktop-e2e-pre-push
+```
+
+## Code quality checks
+
+The desktop uses [Biome](https://biomejs.dev/) for lint and formatting, plus three custom Node scripts:
+
+```bash
+# Run all checks (Biome + custom scripts):
+cd desktop && pnpm check
+
+# Or via just:
+just desktop-check
+```
+
+The three custom quality scripts catch issues that static analysis misses:
+
+| Script | What it enforces |
+|---|---|
+| `check:file-sizes` | Prevents oversized frontend bundles |
+| `check:px-text` | Flags raw `px` units where design tokens should be used |
+| `check:pubkey-truncation` | Ensures pubkeys are always truncated correctly in the UI |
+
+To auto-fix lint and format issues:
+
+```bash
+just desktop-fix
+```
+
+## TypeScript checks
+
+```bash
+cd desktop && pnpm typecheck
+```
+
+This runs `tsc --noEmit` against the full frontend. TypeScript 6 with strict mode is required; CI treats type errors as failures.
+
+## Tauri (Rust) checks
+
+```bash
+# Compile check:
+just desktop-tauri-check
+
+# Lint:
+just desktop-tauri-clippy
+
+# Unit tests:
+just desktop-tauri-test
+
+# Format check:
+just desktop-tauri-fmt-check
+```
+
+## Directory structure
+
+```
+desktop/
+├── src/
+│   ├── app/          # Top-level app composition (router, providers)
+│   ├── features/     # Feature modules — vertical slices, no cross-feature imports
+│   └── shared/       # App-wide reusable code (ui/, lib/, styles/)
+├── src-tauri/
+│   ├── src/          # Rust Tauri commands and event handlers
+│   ├── crates/       # Internal Tauri workspace crates (e.g. buzz-terminal)
+│   ├── binaries/     # Sidecar binary stubs (generated at build time)
+│   └── tauri.conf.json
+├── tests/            # Playwright E2E tests and helpers
+└── scripts/          # Quality-check scripts (check-file-sizes, check-px-text, etc.)
+```
+
+## Key features
+
+<Accordion title="Agent management">
+  The desktop enforces an owner-gated draft/review flow for agent actions. Agents are first-class workspace members — they join channels, post messages, react, and run workflows under their own keypairs. The desktop surfaces agent activity inline with human messages and provides controls to approve, reject, or delegate agent tasks.
+</Accordion>
+
+<Accordion title="Real-time video processing (MediaPipe)">
+  `@mediapipe/tasks-vision` is bundled for client-side real-time video processing. This powers camera-based features without any server round-trip for the vision inference step.
+</Accordion>
+
+<Accordion title="Drag-and-drop">
+  dnd-kit (`@dnd-kit/core`, `@dnd-kit/sortable`, `@dnd-kit/utilities`) provides accessible drag-and-drop across the UI — used for channel ordering, canvas blocks, and file uploads.
+</Accordion>
+
+<Accordion title="Rich Markdown editor (Tiptap)">
+  The message composer uses Tiptap 3 with `starter-kit`, `extension-link`, `extension-placeholder`, and `tiptap-markdown` for composing and rendering Markdown messages. Code blocks are syntax-highlighted via Shiki.
+</Accordion>

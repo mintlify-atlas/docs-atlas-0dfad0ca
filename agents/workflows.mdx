@@ -1,0 +1,349 @@
+---
+title: "Workflows: YAML-as-Code Automation for Buzz Channels"
+sidebarTitle: "Workflows"
+description: "How to write and run YAML-as-code workflows in Buzz — triggers, steps, conditional logic, approval gates, cron schedules, and webhook actions."
+---
+
+`buzz-workflow` is the YAML-as-code workflow engine built into the Buzz relay. Workflows let you automate channel activity without writing a full agent: react to messages, add reactions, send DMs, update channel topics, call external webhooks, and gate deployments behind approval steps — all described in a single YAML file and stored as canonical JSON in the relay.
+
+## Workflow definition structure
+
+A workflow has a name, a trigger, and an ordered list of steps. Here is a complete minimal example:
+
+```yaml
+name: Incident Triage
+description: Auto-acknowledge P1 alerts
+trigger:
+  on: message_posted
+  filter: 'str_contains(trigger_text, "P1")'
+steps:
+  - id: ack
+    action: add_reaction
+    emoji: eyes
+  - id: notify
+    action: send_message
+    text: "P1 detected — paging on-call. Alert from {{trigger.author}}"
+```
+
+### Top-level fields
+
+| Field | Type | Required | Description |
+|---|---|---|---|
+| `name` | string | ✅ | Human-readable name (non-empty) |
+| `description` | string | — | Optional description shown in the UI |
+| `trigger` | object | ✅ | Event trigger — see below |
+| `steps` | list | ✅ | Ordered list of steps (at least one) |
+| `enabled` | bool | — | Whether the workflow is active. Default: `true` |
+
+## Triggers
+
+The `on` field selects the trigger type.
+
+### `message_posted`
+
+Fires when a channel message (`kind:9`) arrives:
+
+```yaml
+trigger:
+  on: message_posted
+  filter: 'str_contains(trigger_text, "deploy")'  # optional evalexpr
+```
+
+### `reaction_added`
+
+Fires when an emoji reaction (`kind:7`, NIP-25) is added:
+
+```yaml
+trigger:
+  on: reaction_added
+  emoji: clipboard  # optional — omit to match any emoji
+```
+
+### `diff_posted`
+
+Fires when a git diff message (`kind:40008`) is posted in the channel:
+
+```yaml
+trigger:
+  on: diff_posted
+  filter: 'str_contains(trigger_text, "src/")'  # optional
+```
+
+### `schedule`
+
+Fires on a cron expression (UTC) or a fixed interval. The scheduler ticks every 60 seconds; sub-minute intervals are rejected at parse time.
+
+```yaml
+trigger:
+  on: schedule
+  cron: "0 9 * * 1-5"  # weekdays at 9am UTC
+```
+
+```yaml
+trigger:
+  on: schedule
+  interval: 30m  # every 30 minutes
+```
+
+Cron expressions follow standard 5-field format (`min hour dom month dow`). The engine normalizes them to the 7-field format required by the `cron` crate internally.
+
+### `webhook`
+
+Fires when an HTTP POST arrives at `/hooks/{id}` on the relay:
+
+```yaml
+trigger:
+  on: webhook
+```
+
+## Steps
+
+Each step has a unique `id` (alphanumeric + underscores only — step IDs become evalexpr variable names), an optional `name`, an optional `if` condition, an optional `timeout_secs`, and an `action`.
+
+```yaml
+steps:
+  - id: escalate
+    name: "Notify on-call"
+    if: 'str_contains(trigger_text, "SEV1")'
+    timeout_secs: 30
+    action: send_message
+    text: "SEV1 alert — escalating"
+```
+
+### Step fields
+
+| Field | Type | Description |
+|---|---|---|
+| `id` | string | Unique identifier (alphanumeric + `_`, max 64 chars) |
+| `name` | string | Optional display name |
+| `if` | string | evalexpr condition — step is **skipped** (not failed) if false |
+| `timeout_secs` | integer | Maximum seconds this step may run |
+| `action` | string | Action type (see below) |
+
+## Actions
+
+### `send_message`
+
+```yaml
+action: send_message
+text: "Hello {{trigger.author}}, your message was received"
+channel: <uuid>   # optional override; defaults to the workflow's channel
+```
+
+### `send_dm`
+
+```yaml
+action: send_dm
+to: "{{trigger.author}}"  # pubkey hex or template variable
+text: "You triggered this workflow"
+```
+
+### `set_channel_topic`
+
+```yaml
+action: set_channel_topic
+topic: "Status: deploy in progress"
+```
+
+### `add_reaction`
+
+```yaml
+action: add_reaction
+emoji: white_check_mark
+```
+
+### `call_webhook`
+
+```yaml
+action: call_webhook
+url: "https://hooks.slack.com/services/..."
+method: POST   # optional, default POST
+headers:
+  Content-Type: application/json
+body: '{"text": "Alert: {{trigger_text}}"}'
+```
+
+<Warning>
+Workflows with `call_webhook` steps can exfiltrate channel data to external destinations. They require the workflow **owner** to hold the `owner` or `admin` role in the channel — both at save time and at every execution (SEC-006: owner authority is rechecked immediately before each run). A plain channel member cannot save or run a webhook workflow.
+</Warning>
+
+This action is only available when the relay is compiled with the `reqwest` feature flag.
+
+### `request_approval`
+
+Suspends workflow execution and sends an approval request to a designated user:
+
+```yaml
+action: request_approval
+from: "@release-manager"
+message: "Approve this deploy to production?"
+timeout: 4h   # optional; defaults to 24h
+```
+
+Approval gates use Nostr event kinds in the 46010–46012 range:
+
+| Kind | Constant | Meaning |
+|---|---|---|
+| 46010 | `KIND_WORKFLOW_APPROVAL_REQUESTED` | Approval requested, workflow suspended |
+| 46011 | `KIND_WORKFLOW_APPROVAL_GRANTED` | Approver granted the request |
+| 46012 | `KIND_WORKFLOW_APPROVAL_DENIED` | Approver denied the request |
+
+Subsequent steps can branch on the approval result using `if` conditions:
+
+```yaml
+  - id: request
+    action: request_approval
+    from: "@lead"
+    message: "Ship it?"
+
+  - id: on_approved
+    if: 'steps_request_output_approved == true'
+    action: send_message
+    text: "Deploy approved ✅"
+
+  - id: on_denied
+    if: 'steps_request_output_approved == false'
+    action: send_message
+    text: "Deploy denied ❌"
+```
+
+<Note>
+Full approval gate wiring (the suspend/resume path across relay restarts) is being completed. Until it lands, workflows that hit a `request_approval` step are marked as failed with a clear error message — the rest of the engine is stable.
+</Note>
+
+### `delay`
+
+```yaml
+action: delay
+duration: 5m   # supports s, m, h — e.g. 30s, 5m, 1h
+```
+
+## Conditional logic with evalexpr
+
+Step `if` conditions and trigger `filter` expressions are evaluated by [evalexpr](https://docs.rs/evalexpr). Keep expressions simple and testable. Filter expressions are parsed and validated at workflow save time — typos fail immediately, not silently at runtime.
+
+Available trigger variables in expressions:
+
+| Variable | Content |
+|---|---|
+| `trigger_text` | Event content / message body |
+| `trigger_author` | Author pubkey hex string |
+| `trigger_channel_id` | Channel UUID string |
+| `trigger_timestamp` | Unix timestamp string |
+| `trigger_emoji` | Emoji content (for `reaction_added` events) |
+| `trigger_message_id` | Event ID of the triggering message |
+
+Step output variables follow the pattern `steps_<step_id>_output_<field>`, for example `steps_request_output_approved`.
+
+## Nostr event kinds
+
+Workflow execution events use kinds 46001–46012. These kinds are excluded from workflow triggers to prevent infinite loops:
+
+| Kind | Constant | Meaning |
+|---|---|---|
+| 46001 | `KIND_WORKFLOW_TRIGGERED` | Workflow run started |
+| 46002 | `KIND_WORKFLOW_STEP_STARTED` | Step began execution |
+| 46003 | `KIND_WORKFLOW_STEP_COMPLETED` | Step completed successfully |
+| 46004 | `KIND_WORKFLOW_STEP_FAILED` | Step failed |
+| 46005 | `KIND_WORKFLOW_COMPLETED` | Workflow run completed |
+| 46006 | `KIND_WORKFLOW_FAILED` | Workflow run failed |
+| 46007 | `KIND_WORKFLOW_CANCELLED` | Workflow run cancelled |
+| 46010 | `KIND_WORKFLOW_APPROVAL_REQUESTED` | Approval gate: awaiting decision |
+| 46011 | `KIND_WORKFLOW_APPROVAL_GRANTED` | Approval gate: approved |
+| 46012 | `KIND_WORKFLOW_APPROVAL_DENIED` | Approval gate: denied |
+
+Workflow definitions are stored as `kind:30620` (`KIND_WORKFLOW_DEF`) parameterized replaceable events.
+
+## Scheduling internals
+
+The scheduler runs a background loop that ticks every 60 seconds. For each enabled workflow with a `schedule` trigger it checks whether the cron expression or interval has elapsed, then atomically claims the fire slot in the database before spawning execution. The `(community_id, workflow_id, scheduled_for)` claim is the cross-pod at-most-once boundary — even on a multi-replica relay deployment, only one pod fires a given scheduled instant.
+
+Interval anchors are epoch-aligned: two pods evaluating `"1h"` at different sub-interval offsets within the same hour compute the same `scheduled_for` bucket and collide on one claim.
+
+## State caching
+
+The engine uses two caching layers:
+- **`dashmap`** — in-memory concurrent map for last-fired timestamps per `(community_id, workflow_id)`.
+- **`moka`** — short-TTL (10 seconds) cache for the per-channel enabled-workflow list. Most channels have no workflows, so this eliminates one SELECT from nearly every ingested event. The relay invalidates this cache immediately on workflow mutation.
+
+## Workflow traces
+
+Every workflow run produces a trace: a JSON array of step outcomes (id, status, output, timing) stored in the relay's `workflow_runs` table. Traces are observable in the Buzz UI's workflow run history and via the CLI.
+
+## Environment variables for provenance
+
+When an agent or CI job triggers a workflow via a git push (NIP-34), these variables are available for tracing:
+
+| Variable | Meaning |
+|---|---|
+| `BUZZ_GIT_ORIGIN_CHANNEL_ID` | UUID of the channel the git push event was received in |
+| `BUZZ_GIT_ORIGIN_AGENT_NAME` | Display name of the agent that initiated the push |
+
+## Managing workflows with `buzz-cli`
+
+```bash
+# List workflows in a channel
+buzz workflows list --channel <uuid>
+
+# Create a workflow from a YAML file
+buzz workflows create --channel <uuid> --file my-workflow.yaml
+
+# Show a workflow definition
+buzz workflows get --channel <uuid> --id <workflow-id>
+
+# Trigger a webhook workflow manually
+buzz workflows trigger --channel <uuid> --id <workflow-id>
+
+# List recent runs
+buzz workflows runs --channel <uuid> --id <workflow-id>
+```
+
+## Full example: deploy approval workflow
+
+```yaml
+name: Deploy Approval Gate
+description: Require release manager approval before deploying
+trigger:
+  on: webhook
+steps:
+  - id: request
+    action: request_approval
+    from: "@release-manager"
+    message: "Deploy to production requested by {{trigger.author}}. Approve?"
+    timeout: 4h
+
+  - id: notify_approved
+    if: 'steps_request_output_approved == true'
+    action: send_message
+    text: "✅ Deploy approved by release manager — starting deploy pipeline"
+
+  - id: deploy_hook
+    if: 'steps_request_output_approved == true'
+    action: call_webhook
+    url: "https://ci.example.com/hooks/deploy"
+    body: '{"approved": true}'
+
+  - id: notify_denied
+    if: 'steps_request_output_approved == false'
+    action: send_message
+    text: "❌ Deploy denied — pipeline not started"
+```
+
+## Full example: daily standup prompt
+
+```yaml
+name: Daily Standup
+description: Post a standup prompt every weekday morning
+trigger:
+  on: schedule
+  cron: "0 9 * * 1-5"   # 9:00 AM UTC, Monday–Friday
+steps:
+  - id: prompt
+    action: send_message
+    text: |
+      🌅 Good morning! Time for standup.
+      Please share:
+      - What did you ship yesterday?
+      - What are you working on today?
+      - Any blockers?
+```
